@@ -223,7 +223,7 @@ NPU 覆盖率(相对 GPU)          :  50.3%
 
 **关键结论**:decomposition **不改变覆盖率**。被分解的高层 op 只是被**路由**到 ~173 个可融合 primitive 上;可融合 primitive 集由 lowering.py 注册决定(固定),86 个损失 primitive(`prims.exp`/`aten.erf`/`acos`/`cumsum` 等)也不因分解而消失。
 
-> 验证脚本见 §7 的 `agent_space/measure_decomp_coverage.py`。
+> 验证脚本见 §7 的 `docs/ai_gen/scripts/measure_decomp_coverage.py`。
 
 ### 5.5 NPU 融合覆盖率汇总
 
@@ -525,13 +525,20 @@ NPU 覆盖率(相对 GPU)          :  50.3%
 
 这套方法给出**完整且与手工核对一致**的 **173 个 GPU 可融合算子**。它不是最优雅的(纯插桩更优雅),但在 inductor 的"import 时注册 + fn 无标记"架构下,**是唯一稳健可行的静态方法**;权威的 IR 类型判定需实际跑 lowering(代价高、fragile),不值得为 completeness 付出。
 
-### 统计脚本(已放在 `agent_space/`,git-ignored)
+### 统计脚本(随文档放在 `docs/ai_gen/scripts/`,已纳入版本管理)
 
 | 脚本 | 口径 | 产出 |
 |---|---|---|
-| `agent_space/measure_decomp_coverage.py` | decomposition(§5.4-5.7) | U=660,GPU 可融 173,NPU 可融 87,静态差距 86(运行时相关 52,34 个 prims 惰性),覆盖率 50.3%(活跃 55.2%)+ 全表。**survivor 用 overload 级判定**(op 任一 overload 存活即计入) |
+| `docs/ai_gen/scripts/measure_decomp_coverage.py` | decomposition(§5.4-5.7) | U=660,GPU 可融 173,NPU 可融 87,静态差距 86(运行时相关 52,34 个 prims 惰性),覆盖率 50.3%(活跃 55.2%)+ 全表。**survivor 用 overload 级判定**(op 任一 overload 存活即计入) |
 | 上节 inline 脚本 | 概念算子(§5.1-5.3) | GPU_FUSIBLE=185,REAL_LOSS=89,覆盖率 51.9% |
-| `agent_space/measure_fusion_depth.py` | 图级 D 口径(§6) | 在 GPU/NPU 真机上量 ops_in/kernels/fusion_depth/extern |
+| `docs/ai_gen/scripts/measure_fusion_depth.py` | 图级 D 口径(§6) | 在 GPU/NPU 真机上量 ops_in/kernels/fusion_depth/extern |
+
+> **运行方式**:`measure_decomp_coverage.py` 需要 torch_npu 的 fallback 列表(torch_npu 是独立仓),用环境变量指定:
+> ```bash
+> TORCH_NPU_FALLBACK_LIST=/path/to/torch_npu/_inductor/lowering_fallback_list.py \
+>     python docs/ai_gen/scripts/measure_decomp_coverage.py
+> ```
+> 复现结果:U=660,GPU 可融 173,NPU 可融 87,差距 86,覆盖率 50.3%。`measure_fusion_depth.py` 在装了 torch_npu 的 NPU 机器或 CUDA 机器上直接 `python docs/ai_gen/scripts/measure_fusion_depth.py --device npu|cuda` 运行。
 
 ### decomposition 口径核心脚本(§5.4-5.5 的来源)
 
@@ -583,7 +590,7 @@ print(len(U), len(gpu_U), len(npu_U), len(gpu_U - npu_U))   # 660 173 87 86
 1. **把 §5.7 的 52 个活跃损失算子当 backlog 追踪**(86 含 34 个惰性死登记):每修掉一个,覆盖率涨一格。
 2. **优先级排序**(按活跃损失):`Pointwise(aten 侧 ~24) > View(12) > Scan(5) > In-place(8) > Reduction(3)`——其中 **Scan 整类(5 个)全不支持**,是性价比最高的补齐点。
 3. **优先修 aten/prims 不一致**:`aten.exp` 可融但 `prims.exp` 在 fallback 这类(见 §5.5 注),34 个惰性 prims 是死登记,清理后"592 条 fallback"立即瘦身。
-4. **不要单看这个数判性能**:务必配合端到端 benchmark + 融合深度(`agent_space/measure_fusion_depth.py`)。AclNN 库 kernel 对超越函数可能反而更快。
+4. **不要单看这个数判性能**:务必配合端到端 benchmark + 融合深度(`docs/ai_gen/scripts/measure_fusion_depth.py`)。AclNN 库 kernel 对超越函数可能反而更快。
 5. **decomposition 不是护身符**:实测证明覆盖率与口径无关,固定 ~50%。
 
 ---
