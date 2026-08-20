@@ -58,6 +58,192 @@
 | `ExternKernel` | 6990 | — | ❌ 基本不可融(除 `UserDefinedTritonKernel` epilogue) |
 | `NopKernel`/`ConcatKernel` | 6727/6735 | — | ❌ 不可作 producer |
 
+### 1.1 融合裁决的完整调用链:四层漏斗
+
+一个融合决策不是单点判断,而是**四层漏斗逐层收紧,全部通过才真正 `fuse()`**:
+
+```
+候选对 (node1, node2)
+  │
+  ├─ 第 0 层: IR 类型资格 (lowering 时静态决定, 不可逆)
+  │    get_reduction_type() → None / "sum" / "custom" / "sort" / template / extern
+  │
+  ├─ 第 1 层: Scheduler._can_fuse ── 正确性硬规则 (scheduler.py:8680)
+  │
+  ├─ 第 2 层: V.choices ── 性能启发式 (choices.py:628)
+  │
+  └─ 第 3 层: Backend 闸门 ── numel/rnumel 迭代域匹配 (codegen/simd.py:2285)
+```
+
+> 行号基于 2026-08-20 main 快照,会随代码演进漂移;长期引用请记函数名
+> (`Scheduler._can_fuse` / `Choices.can_fuse` / `SIMDScheduling.can_fuse`)。
+> IR 类型即"融合身份":**lowering 决定出身,scheduler 决定婚配**。
+
+### 1.2 第 1 层:Scheduler 硬规则(正确性,按序短路)
+
+`torch/_inductor/scheduler.py:8680` 的 `_can_fuse`,任一失败即拒:
+
+| # | 规则 | 位置 |
+|---|---|---|
+| 1 | 同节点 / 跨 stream / 跨 mempool 拒 | 8688, 8697-8706 |
+| 2 | `FusedNestedReductions`/`FusedMixOrderReductions` 改道各自 `can_fuse_with` | 8708-8718 |
+| 3 | strict reduction 排斥:template x strict-reduction 拒;red x red 任一 strict 拒 | 8722-8732 |
+| 4 | `GroupedSchedulerNode` / `NopKernelSchedulerNode` 不可融 | 8743-8750 |
+| 5 | Extern 唯一活路:`UserDefinedTritonKernel` epilogue,且必须是"对该 kernel 唯一 mutation 输出的 unary pointwise、读写同索引、布局同构" | 8752-8839 |
+| 6 | node2 是 Extern/Nop(非 template)不可作 consumer | 8841-8846 |
+| 7 | 拓扑序(node2 祖先不能含 node1 输出);`will_fusion_create_cycle` 防 fusion 间接成环 | 8848, 7550 |
+| 8 | Template prologue(node2 是 template):node1 仅限 pointwise、无 alias/mutation、输出单使用者且只喂此 template | 8852-8912 |
+| 9 | Template epilogue(node1 是 template):consumer 不能有 mutation(atomic_add 例外)、不能是 reduction(目前仅 NVGEMM backend 开放) | 8914-8936 |
+| 10 | `no_fuse_buffer_names` 显式禁融;设备必须一致 | 8938-8947 |
+
+### 1.3 第 2 层:V.choices 启发式(性能,非正确性)
+
+`torch/_inductor/choices.py:628` `can_fuse` + 698/708:
+
+- `shared_data_score == 0` 拒("no shared data";除非 `aggressive_fusion` 且双方都不是 reduction)
+- 融合后节点数 > `max_fusion_size` 拒;推高峰值内存拒;IO buffer 数超 `max_fusion_unique_io_buffers` 拒
+- 水平融合额外要求:得分 ≥ `score_fusion_memory_threshold` 且两节点调度距离不远(choices.py:719-726)
+
+`shared_data_score` 来自 `score_fusion_memory`(scheduler.py:9475):**两节点读写依赖集合的交集大小(按字节计)**。pointwise 链上 producer 的写恰好是 consumer 的读,交集非零、得分高。
+
+### 1.4 第 3 层:Backend(Triton)迭代域闸门
+
+`SIMDScheduling.can_fuse`(codegen/simd.py:2285),并被别名为
+`can_fuse_vertical = can_fuse_horizontal = can_fuse`(simd.py:2494)。核心是
+`(numel, rnumel)` 匹配:`numel` 为迭代域元素数,`rnumel` 为归约维长度。
+
+| 组合 | 规则 | 代码 |
+|---|---|---|
+| SplitScan x Reduction | 直接拒("Split scan cannot fuse with reductions") | simd.py:2300-2307 |
+| Reduction + Reduction | `(numel, rnumel)` **完全相等**;不等时仅两条特例活路:MixOrderReduction(行列序互逆的兄弟归约, scheduler.py:335)/ NestedReduction(依赖嵌套归约) | simd.py:2309-2373 |
+| Pointwise + Pointwise | `(numel, rnumel)` 相等(prologue 例外:与已有 prologue 节点同 group 即可);template 直接放行;否则查 tiling 兼容 | simd.py:2375-2436 |
+| Pointwise + Reduction(prologue) | `rnumel1==1` 且 `numel1 == numel2 * rnumel2`(pointwise 展开进归约的迭代域) | simd.py:2438-2467 |
+| Reduction + Pointwise(epilogue) | swap 参数后走 horizontal 分支,要求 `numel1 == numel2` | simd.py:2481 |
+
+### 1.5 索引级匹配与 scatter 屏障
+
+`can_fuse_vertical`(scheduler.py:9043):consumer 的每个未满足读依赖,要么与
+producer 的写在"**同 buffer + 同索引表达式 + 大小前缀匹配**"意义下精确对上,要么由
+可先行调度的节点提供;中间夹着别的节点即拒("intermediate nodes between node1 &
+node2", 9107-9112)。
+
+关键拒绝点在 `fusable_read_and_write`(scheduler.py:9215):
+
+```python
+if self.mode_requires_synchronization(original_write.mode):
+    return False
+```
+
+`mode_requires_synchronization`(scheduler.py:5573)就是 `mode is not None`——**一切带
+scatter/atomic store mode 的写一律不可作为融合对象**。Scatter/Index 家族是 fusion
+barrier 的准确机制是"写模式需全线程同步",**不是算子名单黑名单**;未来新增的
+atomic 类算子会自动落入同一屏障,无需登记名单。
+
+### 1.6 Foreach 特例
+
+`ForeachKernelSchedulerNode.can_fuse`(scheduler.py:3661):
+
+- foreach x foreach:**长度相等 + 逐对子节点可融**
+- foreach x reduction:**双向都拒**(3673-3693)
+- foreach x 普通:找到唯一配对 subnode 后退化为普通融合
+
+### 1.7 融合时序图
+
+> GitHub 与 VSCode(Markdown Preview Mermaid 插件)可直接渲染。
+
+#### 图 1:编译总流水线(融合发生在哪一步)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as torch.compile(model)
+    participant D as Dynamo
+    participant AOT as AOTAutograd
+    participant CF as compile_fx
+    participant GL as GraphLowering
+    participant S as Scheduler
+    participant CG as Backend Codegen (Triton)
+
+    U->>D: model(args)
+    D->>D: 符号化追踪, 捕获 FX Graph
+    D->>AOT: joint graph (aten ops)
+    AOT->>AOT: decomposition (core aten + inductor)
+    Note over AOT: 高层 op 被拆成 primitive<br/>决定哪些算子能到达 lowering
+    AOT->>CF: post-grad aten graph
+    CF->>GL: 逐 op 查 lowerings 表
+    GL->>GL: aten/prims op 转 IR 节点<br/>Pointwise / Reduction / Scan / Template / Extern
+    Note over GL: IR 类型 = 融合资格 (get_reduction_type)<br/>NPU fallback 列表在此前拦截
+    GL->>S: nodes: list[ir.Operation]
+    S->>S: 依赖计算 + 拓扑排序 + foreach 归并
+    loop fuse_nodes 迭代至不动点
+        S->>S: fuse_nodes_once (见图 2)
+    end
+    S->>CG: node_schedule (FusedSchedulerNode 列表)
+    CG->>CG: 每个 fused node 生成一个 Triton kernel
+    CG-->>U: wrapper module (kernel 调用序列)
+```
+
+#### 图 2:fuse_nodes_once 内部的四层裁决时序(核心)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant F as fuse_nodes_once
+    participant G as get_possible_fusions
+    participant C as Scheduler._can_fuse
+    participant M as score_fusion_memory
+    participant H as V.choices (Heuristics)
+    participant B as Backend (SIMDScheduling)
+    participant V as can_fuse_vertical
+
+    F->>G: nodes
+    G->>G: 按共享 buffer 分组<br/>组内窗口两两配对
+    G->>C: (node1, node2)
+
+    activate C
+    Note over C: 第 1 层 正确性硬规则
+    C->>C: stream / mempool / strict-reduction<br/>Extern / Nop / Grouped / 拓扑序 / 设备一致
+    alt node2 是 template (prologue 方向)
+        C->>C: node1 仅限 pointwise<br/>输出单使用者且只喂此 template
+    else node1 是 template (epilogue 方向)
+        C->>C: node2 不能是 reduction<br/>不能有 mutation
+    end
+
+    C->>M: 两节点读写依赖求交集
+    M-->>C: shared_data_score (字节)
+
+    Note over C,H: 第 2 层 性能启发式
+    C->>H: can_fuse(node1, node2, score)
+    H->>H: score==0? max_fusion_size?<br/>峰值内存? IO buffer 数?
+
+    alt 启发式通过
+        alt node2 依赖 node1 输出 (垂直融合)
+            Note over C,V: 第 3a 层 索引级匹配
+            C->>V: consumer 读与 producer 写逐一对齐
+            V->>V: 同 buffer + 同索引<br/>无 scatter/atomic mode
+            V-->>C: True / False
+            Note over C,B: 第 3b 层 迭代域闸门
+            C->>B: can_fuse_vertical (numel, rnumel)
+            B->>B: pw+pw: 全等<br/>pw+red: numel1==numel2 x rnumel2<br/>red+red: 全等或特例<br/>SplitScan+red: 拒
+            B-->>C: True / False
+        else 无依赖但有共同读 (水平融合)
+            C->>H: can_fuse_horizontal
+            H->>H: score >= threshold 且距离近
+            C->>B: can_fuse_horizontal (同一闸门)
+            B-->>C: True / False
+        end
+    end
+    deactivate C
+    C-->>G: True / False (WhyNoFuse 记录原因)
+    G-->>F: possible_fusions 按 score 降序
+
+    loop 按 score 从高到低执行融合
+        F->>F: fuse(node1, node2) 生成<br/>FusedSchedulerNode / Nested / MixOrder / Foreach
+        F->>F: 更新祖先 / 依赖 / 拓扑序
+    end
+    F-->>F: 返回新节点集, 进入下一轮 fuse_nodes
+```
+
 ---
 
 ## 2. GPU(PyTorch 官方)融合分析
@@ -82,23 +268,25 @@
 | **Sort/Topk/Search** | ~8 | 全局排序语义:`sort`, `topk`, `kthvalue`, `median`, `mode`, `searchsorted`, `bucketize` |
 | **Extern/Fallback(pool/upsample)** | ~30+ | `is_extern=True`:`max_pool*_with_indices`, `avg_pool*`, `adaptive_*_pool`, `upsample_nearest*`, 及未注册 op 自动 fallback |
 | **Reduction+Reduction 异 shape** | — | 仅同 shape / mix-order / nested 特殊路径可融 |
-| **SplitScan + Reduction** | — | `simd.py:2077` 显式拒绝 |
+| **SplitScan + Reduction** | — | `simd.py:2300-2307` 显式拒绝(2026-08 快照;早期为 2077) |
 
-### 2.3 融合组合矩阵
+### 2.3 融合组合矩阵(含裁决代码依据)
 
-| Producer → Consumer | 可融? | 条件 |
-|---|---|---|
-| Pointwise + Pointwise | ✅ | 同 `(numel, rnumel=1)` |
-| Pointwise + Reduction | ✅ | prologue/epilogue |
-| Reduction + Pointwise | ✅ | 读归约结果 |
-| Reduction + Reduction(同 shape) | ✅ | 兄弟归约 |
-| Template + Pointwise | ✅ | matmul/conv epilogue |
-| Pointwise + Template | ✅ | prologue fusion |
-| Foreach + Foreach | ✅ | 子节点逐对可融 |
-| SplitScan + Reduction | ❌ | `simd.py:2077` |
-| Foreach + Reduction | ❌ | `scheduler.py:3256` |
-| Reduction + Template prologue/epilogue | ❌ | consumer 不能是 reduction |
-| 带 scatter/atomic mode 的 op + 读取 | ❌ | 需同步写 |
+| Producer → Consumer | 可融? | 条件 | 裁决位置(2026-08 快照) |
+|---|---|---|---|
+| Pointwise + Pointwise | ✅ | 同 `(numel, rnumel=1)` | `simd.py:2375-2385` + choices 共享数据分 |
+| Pointwise + Reduction | ✅ | prologue | `simd.py:2438-2449`(`numel1 == numel2*rnumel2`) |
+| Reduction + Pointwise | ✅ | epilogue(读归约结果) | `simd.py:2481` swap 后 `numel1 == numel2` |
+| Reduction + Reduction(同 shape) | ✅ | 兄弟归约 | `simd.py:2310` 全等;特例 mix-order(`scheduler.py:335`)/nested |
+| Template + Pointwise | ✅ | matmul/conv epilogue | `scheduler.py:8914-8936` |
+| Pointwise + Template | ✅ | prologue fusion | `scheduler.py:8852-8912` + `simd.py:2387-2406` |
+| Foreach + Foreach | ✅ | 子节点逐对可融 | `scheduler.py:3663-3672`(需长度相等) |
+| SplitScan + Reduction | ❌ | 显式拒绝 | `simd.py:2300-2307`(早期快照为 2077) |
+| Foreach + Reduction | ❌ | 双向拒绝 | `scheduler.py:3673-3693`(早期快照为 3256) |
+| Reduction + Template prologue/epilogue | ❌ | consumer 不能是 reduction | prologue:`scheduler.py:8857-8859`;epilogue:`scheduler.py:8922-8924`(仅 NVGEMM 开放) |
+| 带 scatter/atomic mode 的 op + 读取 | ❌ | 需同步写 | `scheduler.py:9215` + `5573`(`mode is not None` 即拒) |
+
+> Scatter 拒绝不是名单制而是**模式制**:任何 store mode 非 None 的写(scatter_add/atomic/TMA)一律因"需全线程同步"被拒,新增 atomic 类算子自动落入同一屏障(机制详见 §1.5)。
 
 ---
 
@@ -595,4 +783,4 @@ print(len(U), len(gpu_U), len(npu_U), len(gpu_U - npu_U))   # 660 173 87 86
 
 ---
 
-*文档生成日期:2026-07-20;§5.4-5.5 decomposition 口径实测 + 惰性 prims 静态分析补充于同日。数据基于分析时的 PyTorch(已装 2.11.0)与 torch_npu 代码快照,数字会随两边代码演进变化,建议定期用第 7 节脚本复测。*
+*文档生成日期:2026-07-20;§5.4-5.5 decomposition 口径实测 + 惰性 prims 静态分析补充于同日。§1.1-1.7 四层裁决架构详解与融合时序图、§2.3 代码依据列补充于 2026-08-20(行号基于当日 main 快照)。数据基于分析时的 PyTorch(已装 2.11.0)与 torch_npu 代码快照,数字会随两边代码演进变化,建议定期用第 7 节脚本复测。*
