@@ -249,10 +249,31 @@ PYTHONPATH=/tmp/pt:/tmp/pt/test/inductor TORCH_DEVICE_BACKEND_AUTOLOAD=0 \
 | 2 | CPU 容器全量收集 | 14,445 | 156 模块 (0 错误) | `pytest --collect-only` |
 | 3 | CPU 全环境推算 (含 28 个环境跳过模块) | ~1.9 万 (下界) | 全部 184 模块 | 14,445 + ~4,300 推算 |
 | 4 | **NVIDIA L4 CI 实际执行** | **23,749** | `test/inductor/` 75 文件 (23,677) + 目录外 2 文件 (72) | junit 解析 |
+| 4a | └ fast 层 (`default` config, 每次提交) | 23,670 | 同上, 排除 slow 标记项 | junit skip 原因拆分 |
+| 4b | └ slow 层 (`slow` config, 每日 slow.yml) | 79 | 清单见 `test/slow_tests.json` + `@slowTest` | junit skip 原因拆分 |
 | 5 | AMD MI350 CI 实际执行 | 5,126 | 固定 5 文件 (opinfo/AOTI/origami) | junit 解析 |
 | 6 | **单卡 CUDA 全量推算 (TD 不裁剪)** | **约 2.87 万** | 77 + 93 个 TD 未选文件 | 23,749 + 3,716 x 1.33 |
 
 其中口径 4 的 23,677 (目录内) + 72 (目录外 `test_inductor_collectives` 67 + `test_inductor_compile_collectives` 5) = 23,749。
+
+#### 7.5.1 按 CI 执行优先级分层 (fast / slow)
+
+PyTorch CI 把测试分两个执行优先级层, 机制是:
+
+- **标记**: 两个来源。代码内 `@slowTest` 装饰器 (inductor 目录 6 个静态函数: `test_benchmark_fusion` 1 / `test_cpu_repro` 3 / `test_torchinductor` 2); 以及 `test/slow_tests.json` 清单 (全仓 275 条, 按 "测试名 (classname)" 精确匹配, 可直接命中 opinfo 的单个展开项如 `test_comprehensive_linalg_svd_cuda_float64`, inductor 相关 44 条 = 40 个 opinfo 展开项 + 4 个 AOTI/dynamic 项)。
+- **执行**: `default` config (trunk.yml 每次提交) 不设 `PYTORCH_TEST_WITH_SLOW`, slow 项**收集但 skip**; `slow` config (slow.yml, push main + 每日 cron 01:29 PDT, GPU 3 分片) 设 `PYTORCH_TEST_WITH_SLOW=1` + `PYTORCH_TEST_SKIP_FAST=1`, 只执行 slow 项。两层互补无重叠, **并集恰好等于收集全量**。
+
+L4 CUDA 实测 (run 32193788776) 的分层结果:
+
+| 优先级层 | CI 载体 | 用例数 | 其中实跑 | 其中 skip (原因) |
+|---|---|---:|---:|---:|
+| fast 层 (`default` config) | trunk.yml `test (default, i/14)`, 每次提交 | **23,670** | 18,794 | 4,876 (硬件/环境: `cpu not supported`、CuTeDSL/MPS/FlashAttention 库缺失、显存不足等, 非 slow) |
+| slow 层 (`slow` config) | slow.yml 每日 cron, 3 分片 | **79** | 0 (本 run 内被 skip, 由 slow job 执行) | 79 (`test is slow`) |
+| **合计 (两层并集)** | — | **23,749** | | = default job 收集全量 |
+
+79 个 slow 项在文件上的分布: `test_torchinductor_opinfo` 41 (linalg/svd/插值/池化等重计算 op x dtype 组合, 对应 `slow_tests.json` 中 40 条清单 + 清单外运行时判定 1), `test_torchinductor` 9, `test_compile_subprocess` 8, `test_torchinductor_dynamic_shapes` 7, `test_torchinductor_codegen_dynamic_shapes` 6, `test_compiled_autograd` 4, `test_aot_inductor` 2, `test_cpu_repro` 2。目录外 2 个 distributed 文件 (72 例) 全部属于 fast 层。
+
+即: **适配 (执行) 一次完整 CI, 需同时跑 fast 层 23,670 项 (每次提交) 与 slow 层 79 项 (每日一次), 合计 23,749 项 —— 与 default job 的收集全量一致, slow 层占比仅 0.3%, 但含 svd/linalg 等单用例耗时最重的数值验证**。
 
 ### 7.6 按特性拆分的用例统计
 
