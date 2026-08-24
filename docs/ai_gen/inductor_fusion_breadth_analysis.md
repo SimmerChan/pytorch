@@ -16,6 +16,8 @@
 - [6. 指标的边界:能反映什么 / 不能反映什么](#6-指标的边界能反映什么--不能反映什么)
 - [7. 可复现方法](#7-可复现方法)
 - [8. 结论与可操作建议](#8-结论与可操作建议)
+- [9. 实战例子:100 op 图怎么压成几个 kernel](#9-实战例子100-op-图怎么压成几个-kernel)
+- [10. 融合 kernel 含的算子数上限](#10-融合-kernel-含的算子数上限)
 
 ---
 
@@ -783,4 +785,118 @@ print(len(U), len(gpu_U), len(npu_U), len(gpu_U - npu_U))   # 660 173 87 86
 
 ---
 
-*文档生成日期:2026-07-20;§5.4-5.5 decomposition 口径实测 + 惰性 prims 静态分析补充于同日。§1.1-1.7 四层裁决架构详解与融合时序图、§2.3 代码依据列补充于 2026-08-20(行号基于当日 main 快照)。数据基于分析时的 PyTorch(已装 2.11.0)与 torch_npu 代码快照,数字会随两边代码演进变化,建议定期用第 7 节脚本复测。*
+*文档生成日期:2026-07-20;§5.4-5.5 decomposition 口径实测 + 惰性 prims 静态分析补充于同日。§1.1-1.7 四层裁决架构详解与融合时序图、§2.3 代码依据列补充于 2026-08-20(行号基于当日 main 快照)。§9 实战例子与 §10 融合 kernel 上限补充于 2026-08-24。数据基于分析时的 PyTorch(已装 2.11.0)与 torch_npu 代码快照,数字会随两边代码演进变化,建议定期用第 7 节脚本复测。*
+
+---
+
+## 9. 实战例子:100 op 图怎么压成几个 kernel
+
+> **前置:** 本节用 [`agent_space/demo_fusion.py`](../../agent_space/demo_fusion.py) 演示,CPU
+> 即可跑(`build_fusion_regions` 与 `is_fusible_node` 都是设备无关的);要量化真机融合深度
+> 用 [`agent_space/measure_fusion_depth.py`](../../agent_space/measure_fusion_depth.py)。
+
+### 9.1 三关准入:100 个 op 怎么被逐一过滤
+
+每个 op 想"进同一个 kernel"必须依次通过三关,任一关拒绝就出局:
+
+| 关卡 | 问什么 | 实现位置 |
+|---|---|---|
+| 关 1:出身资格 | lowering 把这个 op 翻成什么 IR?`Pointwise.get_reduction_type() is None` → 可任意融;`Reduction` → 可作 epilogue/prologue;`ExternKernel` → 基本不可融 | [`ir.py:1237`](../../torch/_inductor/ir.py#L1237)、[`1426`](../../torch/_inductor/ir.py#L1426)、[`7163`](../../torch/_inductor/ir.py#L7163) |
+| 关 2:合法性 | 两节点 buffer 依赖是否对得上?(同 buffer + 同索引 + 大小前缀);写是否带 scatter/atomic mode?拓扑序是否成环?template 方向的额外约束? | [`scheduler.py:8680`](../../torch/_inductor/scheduler.py#L8680) `_can_fuse` 10 条短路规则 |
+| 关 3:迭代域匹配 | `(numel, rnumel)` 一致?`rnumel1==1` 且 `numel1==numel2*rnumel2` 才允许 pointwise prologue 进归约;`SplitScan x Reduction` 直接拒 | [`simd.py:2285`](../../torch/_inductor/codegen/simd.py#L2285) |
+
+**100 个 op 的判定流水线:**
+
+```
+所有 op → fx graph → 拓扑序
+       → 沿序遍历, 非可融节点 (mm/conv/cat 等 extern) 在每处切一刀 → 候选 "融合跨度" (span)
+       → 跨度内按 data dependency 做 UnionFind, 一个连通分量 = 一个候选 region
+       → 每个 region 进关 2/3 → 通过 = 1 个 FusedSchedulerNode → codegen 出 1 个 Triton kernel
+```
+
+### 9.2 ~100 op 的 TinyBlock:实际能融成几个
+
+模型结构:[`demo_fusion.py`](../../agent_space/demo_fusion.py) 里的 `TinyBlock`(两个 MHA + FFN,约 100 个 call_function):
+
+| 算子类别 | 个数 | 融合角色 |
+|---|---|---|
+| `nn.Linear` (aten.addmm/mm) | 4 | `TemplateBuffer`:每个独立一个 kernel,prologue 可吃 1 个前点,epilogue 同理 |
+| `aten.matmul` (QKᵀ、attn@V) | 2 | 同上 |
+| `aten._softmax` | 1 | `Reduction IR`:reduction + 归一化点 → 可融成 1 个 kernel |
+| `aten.mul/add/tanh/gelu` 等逐元素 | ~70-80 | `Pointwise`:连续链理论上 1 个 kernel 吃掉整段 |
+| `aten.view/transpose/chunk` | ~15-20 | **零开销视图但打断融合链**——产物是新 buffer 名,下游必须重新开始 |
+
+把 `max_fusion_size` 从 64 调到 8 跑同一图,典型结果(`demo_fusion.py` 实测):
+
+| `max_fusion_size` | 保留 region 数 | 估算 fused kernel(含 extern) |
+|---|---|---|
+| 64 (默认) | 多块大 region(LN+残差链) | ~10 |
+| 32 | 相同 region 被切小 | ~15 |
+| 16 | 进一步切 | ~25 |
+| 8 | 切到最小粒度 | ~40+ |
+
+> **直观结论:** `max_fusion_size` 是真硬上限,但实际 kernel 数主要取决于被 extern/view 切断的次数。
+
+### 9.3 典型子图的 fused kernel 数与 depth
+
+| 子图类型 | fused kernel 数 | depth (ops/kernel) |
+|---|---|---|
+| 纯 pointwise 链 | 1 | 长链 |
+| Linear → GELU → Linear | 2-3 | 1-2 |
+| Attention (QKᵀ → softmax → @V) | 3 | 1 |
+| MLP block (LN → Linear → GELU → Linear) | 4-6 | 2-4 |
+
+所以 ~100 op 的 transformer block 实际产出 **15-25 个 fused Triton kernel + 几个 extern**——`measure_fusion_depth.py` 在真机上量化这个数字。
+
+---
+
+## 10. 融合 kernel 含的算子数上限
+
+**有,五个独立上限,任一触发即停:**
+
+### 10.1 `max_fusion_size`(默认 64,[`config.py:1020`](../../torch/_inductor/config.py#L1020))
+
+`choices.can_fuse` 在 `len(node1.get_nodes()) + len(node2.get_nodes()) > config.max_fusion_size` 时直接拒([`choices.py:675`](../../torch/_inductor/choices.py#L675))。
+
+> **含义:** 一个 fused node 含的**原始 scheduler node 数 ≤ 64**(默认)。一段 chain
+> 已经融到 32 个节点,再加任何新节点会越过 64,立刻停。
+>
+> 注意它不是"一个 kernel 多少算子"——`Pointwise` IR 在 scheduler 里通常 1 个 node,
+> 但 `inner_fn` 里嵌了 N 个 aten op 的 lambda(lowering 的 `make_pointwise` 把表达式拼进
+> 单个 `inner_fn`,见 [`lowering.py:732-855`](../../torch/_inductor/lowering.py#L732-L855))。
+> **真实"一个 Triton kernel 执行的 aten op 数"上限远大于 64**,但**调度图上的 node 数上限是 64**。
+
+### 10.2 `max_fusion_unique_io_buffers`(默认 None,[`config.py:1031`](../../torch/_inductor/config.py#L1031))
+
+当显式设置时(如 max-autotune 常给 32/48),`fusion_prevent_too_many_reads_and_writes`
+([`scheduler.py:7653`](../../torch/_inductor/scheduler.py#L7653))估算"融合后这个 kernel 的
+unique I/O buffer 总数",超阈值则拒。这是为了**避免 fused kernel 形参太多 → register
+pressure → 编译变慢**。这是 max-autotune 模式比默认更激进但仍设上限的根因。
+
+### 10.3 `max_pointwise_cat_inputs`(默认 8,[`config.py:1041`](../../torch/_inductor/config.py#L1041))
+
+`aten.cat` 只在输入数 ≤ 8 时被认作可融([`fusion_regions.py:54-60`](../../torch/_inductor/fx_passes/fusion_regions.py#L54-L60));
+超过则 cat 自身变成 extern kernel。
+
+### 10.4 隐式上限:pairwise 窗口
+
+`get_possible_fusions`([`scheduler.py:7494-7548`](../../torch/_inductor/scheduler.py#L7494-L7548))
+只枚举共享 buffer 节点的前 `max_fusion_buffer_group_pairwise_attempts=64`
+([`config.py:1027`](../../torch/_inductor/config.py#L1027))个候选。**一个候选 region 里的
+op 沿拓扑序距离不能超过 64**,否则根本不会被对比融合。
+
+### 10.5 隐式上限:reduction/softmax 等天然屏障
+
+softmax 一次吃一个 `aten._softmax`(reduction + 归一化 pointwise),但下一段通常接 matmul
+(template),**所以一条链最长不会跨越超过一个 reduction/extern barrier**。这就是
+`demo_fusion.py` 里 `max_region_size` 一般远小于 64 的原因。
+
+### 10.6 所以"100 个 op 理想能融成 1 个 kernel 吗?"
+
+**几乎从来不能。** 因为:
+
+1. **Linear/matmul/conv 是 TemplateBuffer**,每个独立一个 kernel(最多 prologue 吃 1 个前点、epilogue 吃 1 个后点)。~100 op 的 demo 里就有 4 个 linear + 2 个 matmul,所以 fused kernel **至少 6 个**(prologue 还能合并掉一些)。
+2. **view/transpose/chunk 切断链**——它们的产物是新 buffer 名,下一段必须从新 region 开始。
+3. **softmax (reduction) 是天然屏障**——前后两段各 1 个 kernel。
+
+如需在真机量化,跑 `agent_space/measure_fusion_depth.py` 取 `kernels` 与 `depth` 两列;本机 demo 用 `agent_space/demo_fusion.py`。
