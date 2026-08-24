@@ -32,6 +32,9 @@
    跑社区用例后统计,当前未测),其中 **P0 正确性基线投入最薄(静态 5.3%,按上游实跑分母约
    1%)**、动态形状 69.9%;外围层(opinfo/核心套件/dynamo)已 fork 适配 8,239+41 项 ——
    **外围强、后端弱,inductor 后端从零接入**。
+5. GPU/NPU 定量对比(§5.3,推算):以 GPU opinfo 矩阵可跑面 3,015 项为基准,**NPU 可过项
+   上界 62%~66%,已知必然缺口(fallback 清单)15%~21%,fp64 风险 17%~18%**;fallback 清单
+   已从 221 算子收敛至 136,每收敛一个概念算子平均恢复约 4.7 项。
 
 ---
 
@@ -275,6 +278,38 @@ test_torch 442 等),适配方式为 cuda→npu / onlyCUDA→onlyPRIVATEUSE1 文�
 (TSV 快照 + CI run 32193788776);torch_npu 实际 CI 执行数(gitcode CI 按耗时拆分多机)
 仓内不可见,未计入。
 
+### 5.3 GPU/NPU opinfo 矩阵的定量覆盖率对比 (推算口径)
+
+方法: GPU 侧取 L4 实跑的 opinfo 矩阵逐项数据(3,697 项 junit,含每项 skip 状态与
+op/dtype 解析);NPU 侧取 torch_npu master 的 `NPU_EXTRA_FALLBACK_LIST` 与之做 op 维
+交集(清单当前已收敛至 **136 概念算子 / 409 条目**,较融合广度分析时的 221 算子再收敛
+85 个 —— fallback 收敛在推进中)。对齐规则取两档(严格: 仅同名/后缀; 宽: 含别名映射,
+如 `__or__`↔`bitwise_or`、`_convolution`↔conv 系列),结果给区间。脚本
+`agent_space/opinfo_npu_overlap.py`。
+
+| 分层 | 项数 (严格~宽) | 占 3,697 | 占 GPU 可跑面 3,015 |
+|---|---:|---:|---:|
+| GPU 实际通过 (对比基准) | 3,015 | 81.6% | 100% |
+| GPU skip (上游清单裁剪, 两边共同不跑) | 682 | 18.4% | — |
+| NPU: op 命中 fallback 清单 (**必然非全内核**) | 463~640 | 12.5%~17.3% | **15.4%~21.2%** |
+| NPU: fp64 项 (910B4 精度风险, 需逐例决策) | 514~547 | 13.9%~14.8% | 17.0%~18.1% |
+| NPU: op+dtype 双过 (**可过项上界**) | 1,861~2,005 | 50.3%~54.2% | **61.7%~66.5%** |
+
+定量结论:
+
+- **以 GPU 可跑面为基准,NPU 对 opinfo 矩阵的可过上界约 62%~66%;已知必然缺口
+  (fallback 清单)15%~21%;fp64 风险 17%~18% 需逐例决策**(skip 或精度对齐);
+- 这就是 §5 P0 "fallback 收敛"的定量账: 宽口径下 640 项 / 136 算子 ≈ **每收敛一个
+  概念算子,矩阵平均恢复约 4.7 项**;其中 acos/acosh/atan 等一元超越函数、
+  scatter/index_put 系列、cumsum 系列(cummax/cummin/cumprod/logcumsumexp)是项数
+  最集中的收敛目标;
+- 宽口径"可过/总项"恰为 50.3%,与融合广度分析的 NPU 可融率 50.3% 数值相同 —— 纯属
+  巧合(口径不同),但两个独立方法指向同一量级,互为佐证;
+- **局限(推算而非实测)**: 不在 fallback 清单不保证数值通过(容差/形状/其他 bug 未知),
+  62%~66% 是上界而非预测通过率;校准需在 NPU 环境做 device 注入实测
+  (`pytest test/inductor/test_torchinductor_opinfo.py --device-type=npu` +
+  collect/实跑统计),当前 192.168.9.145 环境不可达,待恢复后补实测数。
+
 ---
 
 ## 6. 落地机制建议(怎么"接入社区 CI 用例")
@@ -304,7 +339,8 @@ test_torch 442 等),适配方式为 cuda→npu / onlyCUDA→onlyPRIVATEUSE1 文�
 - NPU 现状(§5.2):上游 inductor 用例直接 fork 为 0,自建 547 用例覆盖 12/13 域(域级
   投入密度:P0 最薄,静态 5.3%/按实跑分母约 1%;动态形状 69.9%;真适配覆盖率未测);
   外围 opinfo/核心套件已 fork 8,239+41 项,inductor 后端从零接入,device 注入路径
-  (§6.1)即为此设计 —— 其首批产出即真覆盖率的基线数;
+  (§6.1)即为此设计 —— 其首批产出即真覆盖率的基线数;静态推算(§5.3):opinfo 矩阵
+  可过上界 62%~66%,必然缺口 15%~21%,fp64 风险 17%~18%;
 - 落地机制:device 注入 + 受控 skip 列表 + 分层通过率汇报,与融合广度缺口清单合并成统一
   的 P0 任务列表,实现对研发的持续倒逼。
 
@@ -321,7 +357,9 @@ test_torch 442 等),适配方式为 cuda→npu / onlyCUDA→onlyPRIVATEUSE1 文�
 - 脚本:`agent_space/count_inductor_tests.py`(统计)、`agent_space/group_inductor_tests.py`
   (分组与闭合校验)、`agent_space/priority_cases.py`(§5.1 优先级分层实测数)、
   `agent_space/domain_cases.py`(13 域双口径)、`agent_space/map_npu_to_domains.py`
-  (§5.2 torch_npu 测试到 13 域的映射,需本地存在 torch_npu 仓);
+  (§5.2 torch_npu 测试到 13 域的映射,需本地存在 torch_npu 仓)、
+  `agent_space/opinfo_npu_overlap.py`(§5.3 opinfo 矩阵 x NPU fallback 清单交集,
+  需本地存在 torch_npu 仓与 L4 junit 报告);
 - GPU 实跑数(§5.1):trunk CI run 32193788776(commit 165426143e,2026-08-18)的
   L4 junit artifact,按 skip 原因/优先级分组解析,见《torchinductor_test_inventory.md》第 7 节;
 - 已知局限:静态方法数不含运行时展开(opinfo/dtype/device 实例化),用于相对比较与优先级
