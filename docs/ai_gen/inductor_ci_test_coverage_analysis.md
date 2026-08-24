@@ -27,6 +27,10 @@
    (test_torchinductor + opinfo),与融合广度分析(NPU 覆盖率 50.3%、Scan 类 0/5)形成
    "广度+正确性"双看护。实测(L4 CI,§5.1):**应适配 5,741 个静态方法(90.5%),对应 TD 裁剪后
    23,111 项 GPU 用例;P0+P1 即覆盖 GPU 用例的 55.4%**,P3 与"不做集"(601 方法)明确排除。
+4. NPU 现状基线(§5.2):上游 inductor 用例直接 fork 适配为 **0**,自建 `test/_inductor/`
+   547 用例覆盖 12/13 域(相当于应适配量的 8.9%),其中 **P0 正确性基线仅 5.3%**、动态形状
+   69.9%;外围层(opinfo/核心套件/dynamo)已 fork 适配 8,239+41 项 —— **外围强、后端弱,
+   inductor 后端从零接入**。
 
 ---
 
@@ -203,6 +207,58 @@ Blackwell max-autotune(11)、FP8 特定路径(42) —— 这些用例验证的�
 - TD 未覆盖的 97 个应适配文件属本 commit 影响面之外(多为小文件/工具链),全量执行时
   会补齐,分层占比基本不变。
 
+### 5.2 NPU 现状基线 (torch_npu 已适配什么)
+
+数据源: gitcode.com/Ascend/pytorch (torch_npu) master@0ef1735386 静态扫描;把其
+`test/_inductor/` 126 个自建测试文件按功能逐个归入 §2 的 13 域(脚本
+`agent_space/map_npu_to_domains.py`),与 §5.1 的上游双口径对照:
+
+| 特性域(§2) | 优先级 | 上游静态 | 上游 CUDA 实跑 | NPU 自建 | 覆盖率(静态) |
+|---|---|---:|---:|---:|---:|
+| 域1 算子级正确性基线 | **P0** | 1,263 | 6,427 | **67** | **5.3%** |
+| 域10 动态形状 | P1 | 123 | 5,776 | 86 | **69.9%** |
+| 域2 融合与调度 | P1 | 532 | 899 | 124 | 23.3% |
+| 域9 Triton 代码生成 | 专项 | 266 | 461 | 82 | 30.8% |
+| 域7 Graphs/运行时(aclgraph/stream/rng) | P2 | 341 | 280 | 47 | 13.8% |
+| 域4 AOTI(fast_launch/aoti_shim) | P3 | 436 | 1,856 | 56 | 12.8% |
+| 域6 Autotune | P2 | 403 | 118 | 22 | 5.5% |
+| 域12 调试与工具链 | P3 | 973 | 1,169 | 17 | 1.7% |
+| 域8 Autograd 与训练 | P2 | 325 | 1,881 | 3 | 0.9% |
+| 域3 FlexAttention | P3 | 604 | 1,527 | 5 | 0.8% |
+| 域5 缓存与并行编译 | P3 | 425 | 2,697 | 3 | 0.7% |
+| 域11 分布式 | 专项 | 50 | 20 | **0** | 0% |
+| 域13 厂商专属(昇腾自建等价: akg/mlir/dvm) | 不做 | 601 | 557 | 35 | —(自建即建议路径) |
+| **合计** | | **6,342** | **23,668** | **547** | 8.6% |
+
+按 §5 优先级累计 NPU 覆盖(静态口径): P0 67/1,263(5.3%) → +P1 210/655(32.1%) →
++P2 282/1,724(16.4%) → +P3 363/4,162(8.7%) → 合计 **512/5,741(8.9%)**(另 35 个为
+域13 的昇腾自建等价用例)。
+
+结论一 (**上游 inductor 用例的直接 fork 适配为 0**): 上游 `test/inductor/` 184 个文件
+与 torch_npu 仓测试文件同名交集为 0,inductor 后端的 NPU 看护全部走自建
+(`test/_inductor/` 126 文件 / 547 用例)。即 §6.1 建议的 device 注入是从零接入,无既有
+fork 基础可续用。
+
+结论二 (外围层有大量 fork): opinfo 矩阵层已 fork 适配 `test_ops.py`(19)/
+`test_ops_gradients.py`(5)/`test_ops_fwd_gradients.py`(3)/`test_modules.py`(14) 共 41 个
+harness 函数,运行时按 op_db 展开的机制与上游一致;编译栈前端与核心套件 fork 适配
+8,239 个用例(dynamo/ 1,576、test_jit 857、test_autograd 485、test_nn 482、
+test_torch 442 等),适配方式为 cuda→npu / onlyCUDA→onlyPRIVATEUSE1 文本替换 + 手工
+维护(`test/adapt_testcases_to_npu.py`)。外围强、后端弱 —— inductor 后端是补齐重点。
+
+两点解读:
+
+- **P0 恰好是最短板** (67/1,263 = 5.3%,且无 opinfo 全矩阵的 inductor 等价物,67 个
+  基本是单算子 smoke 级),与 §5 排序第一位形成最大缺口;接入社区 opinfo +
+  test_torchinductor 是从 5% 到 50%+ 的最短路径;
+- 自建投入集中在**编译流程可用性**(动态形状 69.9%、Triton 代码生成 30.8%、融合
+  pass 23.3%),而数值正确性矩阵、缓存、autotune、flex 均不足 6% —— 现有用例分布
+  本身就是 §5 分层接入需要纠正的证据。
+
+局限: NPU 侧 547 为静态口径(自建用例参数化少,静态≈执行量级);上游列与 §5.1 同源
+(TSV 快照 + CI run 32193788776);torch_npu 实际 CI 执行数(gitcode CI 按耗时拆分多机)
+仓内不可见,未计入。
+
 ---
 
 ## 6. 落地机制建议(怎么"接入社区 CI 用例")
@@ -229,6 +285,9 @@ Blackwell max-autotune(11)、FP8 特定路径(42) —— 这些用例验证的�
 - 建议按 P0(算子正确性+fallback 收敛)→ P1(动态形状+融合调度)→ P2(autotune/graph/训练)
   → P3(flex/AOTI/工具链)分层接入,应适配合计 **5,741 个静态方法 / TD 裁剪后 23,111 项
   GPU 用例**(§5.1 实测);厂商专属(601 方法)改为昇腾等价自建用例;
+- NPU 现状(§5.2):上游 inductor 用例直接 fork 为 0,自建 547 用例覆盖 12/13 域
+  (P0 仅 5.3%,动态形状 69.9%);外围 opinfo/核心套件已 fork 8,239+41 项,inductor
+  后端从零接入,device 注入路径(§6.1)即为此设计;
 - 落地机制:device 注入 + 受控 skip 列表 + 分层通过率汇报,与融合广度缺口清单合并成统一
   的 P0 任务列表,实现对研发的持续倒逼。
 
@@ -243,7 +302,9 @@ Blackwell max-autotune(11)、FP8 特定路径(42) —— 这些用例验证的�
   入口函数;
 - op 数据库:`torch/testing/_internal/common_methods_invocations.py` 单文件 405 个 OpInfo;
 - 脚本:`agent_space/count_inductor_tests.py`(统计)、`agent_space/group_inductor_tests.py`
-  (分组与闭合校验)、`agent_space/priority_cases.py`(§5.1 优先级分层实测数);
+  (分组与闭合校验)、`agent_space/priority_cases.py`(§5.1 优先级分层实测数)、
+  `agent_space/domain_cases.py`(13 域双口径)、`agent_space/map_npu_to_domains.py`
+  (§5.2 torch_npu 测试到 13 域的映射,需本地存在 torch_npu 仓);
 - GPU 实跑数(§5.1):trunk CI run 32193788776(commit 165426143e,2026-08-18)的
   L4 junit artifact,按 skip 原因/优先级分组解析,见《torchinductor_test_inventory.md》第 7 节;
 - 已知局限:静态方法数不含运行时展开(opinfo/dtype/device 实例化),用于相对比较与优先级
