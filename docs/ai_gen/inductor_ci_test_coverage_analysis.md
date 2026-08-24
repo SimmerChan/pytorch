@@ -32,9 +32,14 @@
    跑社区用例后统计,当前未测),其中 **P0 正确性基线投入最薄(静态 5.3%,按上游实跑分母约
    1%)**、动态形状 69.9%;外围层(opinfo/核心套件/dynamo)已 fork 适配 8,239+41 项 ——
    **外围强、后端弱,inductor 后端从零接入**。
-5. GPU/NPU 定量对比(§5.3,推算):以 GPU opinfo 矩阵可跑面 3,015 项为基准,**NPU 可过项
-   上界 62%~66%,已知必然缺口(fallback 清单)15%~21%,fp64 风险 17%~18%**;fallback 清单
-   已从 221 算子收敛至 136,每收敛一个概念算子平均恢复约 4.7 项。
+5. GPU/NPU 定量对比(§5.3 + §5.4): §5.3 opinfo 矩阵推算——以 GPU 可跑面 3,015 项为基准,
+   **NPU 可过上界 62%~66%,已知必然缺口(fallback 清单)15%~21%,fp64 风险 17%~18%**;
+   fallback 清单已从 221 算子收敛至 136,每收敛一个概念算子平均恢复约 4.7 项。§5.4 域级
+   实测——NPU 自建 481 用例 / GPU 6,342 静态方法 = **7.6%**, / GPU 23,668 L4 实跑 = **2.0%**;
+   域差异极大: 动态形状 69.9% / Triton 代码生成 30.8% / 融合调度 23.3% 集中,FlexAttention
+   0.8% / Autograd 训练 0.9% / 缓存并行编译 0.7% / 调试工具链 1.7% 几近空白。§5.5 标
+   注 NPU 实测校准因 192.168.9.145 环境缺 CANN runtime/kernel 而落空,口径互补的二数
+   据集(opinfo 上界 vs 静态自建)是当前最严格的定量结论。
 
 ---
 
@@ -308,7 +313,66 @@ op/dtype 解析);NPU 侧取 torch_npu master 的 `NPU_EXTRA_FALLBACK_LIST` 与�
 - **局限(推算而非实测)**: 不在 fallback 清单不保证数值通过(容差/形状/其他 bug 未知),
   62%~66% 是上界而非预测通过率;校准需在 NPU 环境做 device 注入实测
   (`pytest test/inductor/test_torchinductor_opinfo.py --device-type=npu` +
-  collect/实跑统计),当前 192.168.9.145 环境不可达,待恢复后补实测数。
+  collect/实跑统计)。
+
+#### 5.3.1 域级定量对比(非 opinfo, 但基于全 13 域方法/用例计数)
+
+`§5.3` 只看 opinfo 矩阵一个子集,但 GPU 13 域有 **6,342 静态方法 / 23,668 L4 实跑用例**
+(`agent_space/coverage_domain_compare.py`,同样口径 §5.1);NPU 侧没有 1:1 fork
+test_torchinductor_opinfo.py,而是按特性自建 test_*.py。把 NPU 自建文件按 `GROUPS` 同一套
+13 域规则归类后,得到域级对比:
+
+| 域 | GPU 静态 | GPU L4 实跑 | NPU 自建用例 | NPU/GPU 静态 |
+|---|---:|---:|---:|---:|
+| 算子级正确性基线 (P0) | 1,263 | 6,427 | 67 | **5.3%** |
+| 动态形状 (P1) | 123 | 5,776 | 86 | **69.9%** |
+| 融合与调度 (P1) | 532 | 899 | 124 | **23.3%** |
+| Autotune & GEMM 模板 (P2) | 403 | 118 | 22 | 5.5% |
+| FlexAttention 家族 (P3) | 604 | 1,527 | 5 | **0.8%** |
+| CUDAGraphs 与运行时 (P2) | 341 | 280 | 46 | **13.5%** |
+| AOTI 与 C++ 封装 (P3) | 436 | 1,856 | 26 | **6.0%** |
+| Triton 代码生成 (专项) | 266 | 461 | 82 | **30.8%** |
+| Autograd 与训练 (P2) | 325 | 1,881 | 3 | **0.9%** |
+| 缓存与并行编译 (P3) | 425 | 2,697 | 3 | **0.7%** |
+| 分布式 (专项) | 50 | 20 | 0 | **0%** |
+| 调试与工具链 (P3) | 973 | 1,169 | 17 | **1.7%** |
+| 厂商/后端专属 (不做) | 601 | 557 | 0 | 0% |
+| **全量** | **6,342** | **23,668** | **481** | **7.6%** |
+
+定量结论(独立于 §5.3 opinfo 推算):
+
+- **NPU 自建用例总量 481,占 GPU 6,342 静态方法的 7.6%、占 GPU L4 实跑 23,668 的 2.0%**;
+  这就是 §5.2 "P0 最薄"的实测背书——P0 算子级基线 NPU 自建 67,覆盖 GPU 1,263 静态方法的
+  **5.3%**(与 §5.1 的"P0 静态 5.3%"完全一致,自洽);
+- **域差异极大**: 动态形状 69.9%、Triton 代码生成 30.8%、融合调度 23.3% 是 NPU 投入
+  相对集中的域(厂商后端专属自建 akg/mlir/dvm,加 aclgraph 替换 cudagraph,使这三域有
+  量);**FlexAttention(0.8%)、Autograd 训练(0.9%)、缓存并行编译(0.7%)、调试工具链
+  (1.7%)是四块几近空白的域**,这与 §5.1 的"P3 静态 1,180 占 18.6%,但实跑分母 8,832 占
+  38%"形成对照——P3 在静态/实跑两口径下都是 NPU 投入最少的层;
+- **opinfo 单点缺口最严重**: GPU `test_torchinductor_opinfo.py` 静态 1 方法、L4 实跑
+  **3,697 个 junit testcases**(405 OpInfo × 多 dtype 多 sample);NPU 自建中
+  `test_<算子>.py` 单算子文件 45 个、共 67 用例,平均每算子 ~1.5 用例,**覆盖深度 ≈
+  67/3,697 = 1.8%**——NPU 算子级基线的"广度"(覆盖算子数)与"深度"(每算子用例数)同时
+  远低于 GPU。这是 §5.3 上界 62%~66% 与 §5.4 实测 1.8% 看似矛盾、实际口径互补的原因:
+  §5.3 算"GPU 跑了多少 opinio case,理论上 NPU 能跑",§5.4 算"NPU 实际写了多少 case";
+  二者差即为"接入社区用例(device 注入)可一次性填平"的潜在空间;
+- **.ci 重叠**: `map_npu_to_domains.py` 已统计 torch_npu `test/_inductor` 文件分布
+  厂商/后端专属(自建 akg/mlir/dvm)39%、Triton 代码生成 9%、融合与调度 9%、CUDAGraphs
+  12%,这部分是 NPU 主动构建的、与 GPU 无对应域;不应在 GPU/NPU 覆盖对比中扣除。
+
+#### 5.3.2 NPU 实测校准状态(192.168.9.145)
+
+192.168.9.145 容器 (`npu_ut_env`, torch 2.10.0 + torch_npu 2.10.0.post1) **2026-08-24
+恢复后实测无法跑通 torch_npu**:驱动齐全(8 张 910B4,npu-smi OK),但宿主/容器内
+**CANN toolkit 仅含 tools/vendors 框架,缺 `aicpu_kernel/` 算子包与完整 `runtime/lib64`**;
+`/usr/local/Ascend/cann-9.0.0-beta.1` 内无 `runtime/`、`opp/built-in/`(除 data 与
+op_proto 外);触发错误 `ImportError: libhccl.so: cannot open shared object file`,
+`torch_npu.init()` 失败 `ERR99999 UNKNOWN application exception`。结论:**该环境缺
+CANN runtime + kernel,torch_npu 装上但不可初始化,无法做 device 注入实跑**。需补装
+CANN 完整包(含 `aicpu_kernel` 与 `runtime`)后再校准;具体最小可运行环境待用户提供。
+
+校准落空的影响:**§5.3 的 62%~66% 仍为上界、§5.4 的 7.6%(静态)/2.0%(实跑)为实测静态
+统计,二者口径互补**;接入社区用例(device 注入)是消除此不确定性的标准做法(§6.1)。
 
 ---
 
@@ -336,11 +400,15 @@ op/dtype 解析);NPU 侧取 torch_npu master 的 `NPU_EXTRA_FALLBACK_LIST` 与�
 - 建议按 P0(算子正确性+fallback 收敛)→ P1(动态形状+融合调度)→ P2(autotune/graph/训练)
   → P3(flex/AOTI/工具链)分层接入,应适配合计 **5,741 个静态方法 / TD 裁剪后 23,111 项
   GPU 用例**(§5.1 实测);厂商专属(601 方法)改为昇腾等价自建用例;
-- NPU 现状(§5.2):上游 inductor 用例直接 fork 为 0,自建 547 用例覆盖 12/13 域(域级
-  投入密度:P0 最薄,静态 5.3%/按实跑分母约 1%;动态形状 69.9%;真适配覆盖率未测);
-  外围 opinfo/核心套件已 fork 8,239+41 项,inductor 后端从零接入,device 注入路径
-  (§6.1)即为此设计 —— 其首批产出即真覆盖率的基线数;静态推算(§5.3):opinfo 矩阵
-  可过上界 62%~66%,必然缺口 15%~21%,fp64 风险 17%~18%;
+- NPU 现状(§5.2/§5.3/§5.4):上游 inductor 用例直接 fork 为 0,自建 481 用例覆盖 12/13 域
+  (域级投入密度:P0 最薄,静态 5.3%/按实跑分母约 1%;动态形状 69.9% / Triton 30.8% / 融合
+  调度 23.3% 集中;FlexAttention 0.8% / Autograd 训练 0.9% / 缓存并行编译 0.7% / 调试工具链
+  1.7% 几近空白);外围 opinfo/核心套件已 fork 8,239+41 项,inductor 后端从零接入,device
+  注入路径(§6.1)即为此设计 —— 其首批产出即真覆盖率的基线数;静态推算(§5.3):opinfo 矩阵
+  可过上界 62%~66%,必然缺口 15%~21%,fp64 风险 17%~18%;域级实测(§5.4):NPU 481 / GPU 6,342
+  静态 = 7.6%,NPU 481 / GPU 23,668 L4 实跑 = 2.0%;二者口径互补(opinfo 矩阵可过上界 vs
+  静态自建覆盖深度);192.168.9.145 NPU 实测校准因缺 CANN runtime/kernel 而落空(§5.5),需
+  补装后用 device 注入机制收基线数;
 - 落地机制:device 注入 + 受控 skip 列表 + 分层通过率汇报,与融合广度缺口清单合并成统一
   的 P0 任务列表,实现对研发的持续倒逼。
 
@@ -359,7 +427,8 @@ op/dtype 解析);NPU 侧取 torch_npu master 的 `NPU_EXTRA_FALLBACK_LIST` 与�
   `agent_space/domain_cases.py`(13 域双口径)、`agent_space/map_npu_to_domains.py`
   (§5.2 torch_npu 测试到 13 域的映射,需本地存在 torch_npu 仓)、
   `agent_space/opinfo_npu_overlap.py`(§5.3 opinfo 矩阵 x NPU fallback 清单交集,
-  需本地存在 torch_npu 仓与 L4 junit 报告);
+  需本地存在 torch_npu 仓与 L4 junit 报告)、`agent_space/coverage_domain_compare.py`
+  (§5.4 13 域 GPU 静态/实跑 vs NPU 自建用例, 同上需本地存在 torch_npu 仓与 L4 junit 报告);
 - GPU 实跑数(§5.1):trunk CI run 32193788776(commit 165426143e,2026-08-18)的
   L4 junit artifact,按 skip 原因/优先级分组解析,见《torchinductor_test_inventory.md》第 7 节;
 - 已知局限:静态方法数不含运行时展开(opinfo/dtype/device 实例化),用于相对比较与优先级
