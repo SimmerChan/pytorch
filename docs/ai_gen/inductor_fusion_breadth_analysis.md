@@ -866,6 +866,274 @@ print(len(U), len(gpu_U), len(npu_U), len(gpu_U - npu_U))   # 660 173 87 86
 > 单个 `inner_fn`,见 [`lowering.py:732-855`](../../torch/_inductor/lowering.py#L732-L855))。
 > **真实"一个 Triton kernel 执行的 aten op 数"上限远大于 64**,但**调度图上的 node 数上限是 64**。
 
+#### 10.1.1 澄清:"调度图 node 数 64" vs "kernel 内 aten op 数"的区别
+
+两个"上限"度量的是完全不同的对象:
+
+| 对象 | 度量 | 上限 | 来源 |
+|---|---|---|---|
+| **调度图 node 数** | `len(fused.get_nodes())`——fused node 内含几个 IR buffer | `max_fusion_size=64` | `choices.can_fuse` 的 `len(node1.get_nodes()) + len(node2.get_nodes()) > 64` 判断([`choices.py:675`](../../torch/_inductor/choices.py#L675)) |
+| **Triton kernel 内 aten op 数** | kernel body 里实际串了几个 aten 表达式 | 无配置硬上限,受 Triton 编译器 / SM 资源约束 | `make_pointwise.inner_fn`([`lowering.py:812-833`](../../torch/_inductor/lowering.py#L812-L833))把 N 个 aten 表达式串成一个 Python 函数 |
+
+#### 10.1.2 可跑代码样例
+
+> 完整脚本见 [`agent_space/demo_kernel_inner.py`](../../agent_space/demo_kernel_inner.py),直接
+> `python demo_kernel_inner.py`(CPU 即可跑;有 GPU 会跑出更准确的 kernel 数量)。
+> 脚本里有两个对比 case,正好对应"长链"和"深链"两类情况:
+
+```python
+# ----- case 1: 长链 100 个加法 — 调度图 node 数被 max_fusion_size 卡住 -----
+def g_long_chain(x):
+    for i in range(100):
+        x = x + 1
+    return x
+
+# ----- case 2: 深链 — 单 Pointwise 内嵌多个 aten op -----
+def g_deep_chain(x):
+    # 这一行 Python 表达式 = N 个 aten op 串联
+    return (x.relu() * 2 + 1).sigmoid().tanh() * 0.5 \
+           + (x.relu() * 2 + 1).cos()
+```
+
+把这两段函数喂给 `torch.compile`,然后用以下两个量同时观察:
+
+```python
+from torch._inductor import metrics
+metrics.generated_kernel_count       # 调度图 fused node 数(每个 → 1 个 Triton kernel)
+metrics.ir_nodes_pre_fusion          # 进入 scheduler 的 IR node 总数
+```
+
+并解析 `output_code_log` 抓生成的 Triton kernel body,数里面的 aten op 调用次数
+(`torch.relu(`, `torch.sigmoid(`, `torch.tanh(`, `torch.cos(` 等正则计数)。
+
+**期望输出**(示意,以本机实测为准):
+
+```
+============================================================
+[case 1] 长链 100 个加法 — 调度图 node 数受 max_fusion_size 限
+============================================================
+  调度图 fused node 数(generated_kernel_count): 2          ← 切成 2 段,每段 ≤ 64
+  ir_nodes_pre_fusion (含 chain 中每段):       100
+  Triton kernel 数(估计):                       2
+  单段 kernel 内 aten op 数(粗略):              ~50         ← 每段约 50 个 add
+
+============================================================
+[case 2] 深链 — 单 Pointwise 内嵌多个 aten op
+============================================================
+  调度图 fused node 数:                         1          ← 只 1 个 Pointwise IR node
+  ir_nodes_pre_fusion:                          1
+  Triton kernel 内 aten op 数(粗略):           7           ← 但 kernel 体真的执行 7 个 aten
+  说明:Python 一行内串联的 N 个 torch op,被 inductor 折成一个 Pointwise,
+       但 kernel body 真的会逐个执行这 N 个 aten op。
+```
+
+关键观察:
+
+| Case | 调度图 node 数 | kernel 内 aten op 数 | 谁限住了? |
+|---|:---:|:---:|---|
+| case 1(长链 100 加法) | 2 | ~50 | `max_fusion_size=64` 把 100 个切成 2 段 |
+| case 2(深链一行 7 op) | 1 | 7 | 单 Pointwise 的 `inner_fn` 把 7 个 aten 串成一个 Python 表达式 |
+
+**结论:**
+
+- **调度图 node 数 ≤ `max_fusion_size=64`**——卡在调度层(`choices.can_fuse:675`)。
+- **Triton kernel 内 aten op 数无 64 的硬上限**——卡在 Triton 编译器与 GPU SM 资源上,
+  实际可承载数百个 aten op。
+- 同样一句 `max_fusion_size`,**它管的对象是"调度图上的 fused node"**,**不是"kernel
+  body 里的 aten op 数量"**——后者由 `inner_fn` 的表达式长度决定,而不是 64。
+
+#### 10.1.3 这两个 case 的差异点(避开常见误解)
+
+> 用户常有的疑问:`case 1` 不就是 100 个算子、`case 2` 不就是一行写一起、差别不大?
+> 这里把"算子"的口径理清,避免数错。
+
+| 维度 | case 1 `g_long_chain` | case 2 `g_deep_chain` |
+|---|---|---|
+| Python 源码里的 aten op 数 | 100 个 `x + 1`(aten.add.Tensor) | 7 个调用:`relu / mul / add / sigmoid / tanh / mul / add / cos` |
+| **inductor 看到的 aten op 数**(进入 AOT 后的 fx graph) | 100(每个 `x = x + 1` 都是单独的 aten.add.Tensor 节点) | 7(decomposition 不一定拆开,relu/sigmoid/tanh/cos 一般保留为单 op) |
+| **进入 scheduler 的 IR node 数**(`ir_nodes_pre_fusion`) | 100(每个 `x = x + 1` 翻成一个 Pointwise,**前提是 dtype 一致**) | 1(整个表达式折进 1 个 Pointwise 的 `inner_fn`) |
+| **max_fusion_size=64 触发?** | 触发,切成 2 段 | 不触发,只 1 个 IR node |
+| **生成 Triton kernel body 里实际串的 aten op** | 每段约 50 个加法(同 kernel 体内联展开) | 7 个(relu→mul→add→sigmoid→tanh→mul→add→cos) |
+
+**关键澄清**——`case 1` 之所以被 `max_fusion_size` 卡,**不是**因为 kernel 不能装 100 个加法
+(显然装得下),而是**因为 inductor 把每一步都做成一个独立的 IR node**(每个 IR node 形参独立、
+codegen 时独立生成),所以"调度图上的节点数"先到达上限。这是调度层的"组织纪律",不是
+kernel 执行能力的硬上限。
+
+**`case 2` 之所以不被卡**,是因为 inductor 不再为每个 `relu`/`sigmoid`/`tanh`/`cos` 单独
+生成 IR node,而是把它们编进同一个 Pointwise 的 `inner_fn`——所以**调度图上 1 个 node,但
+kernel body 真的执行 7 个 aten op**。这里的 7 完全可换成 70、700,只要 Triton 编译器能编译、
+SM 资源够用就行。
+
+#### 10.1.4 如果 case 2 加上 matmul,处理逻辑完全不同
+
+> 常见误解:`matmul 也会被 make_pointwise 包装成 Pointwise IR`。
+> 实际**不**。`aten.mm` 在 lowering 表里走独立的 [`kernel/mm.py:326`](../../torch/_inductor/kernel/mm.py#L326) `tuned_mm`,
+> 与 `make_pointwise`/`make_reduction`/`TemplateBuffer` 三条独立 IR 路径分叉。
+
+`aten.mm` 在 [`kernel/mm.py`](../../torch/_inductor/kernel/mm.py) 里有三种产出:
+
+| 路径 | 触发条件 | 产出的 IR | codegen 后端 | 能吃 prologue / epilogue? |
+|---|---|---|---|---|
+| **A. tl.dot 改写** | `triton.native_matmul=True` 且 dtype 支持 | `Pointwise(ops.dot)` + `Reduction("dot")` 两个 IR | Triton `tl.dot` | 能,但 prologue/epilogue 受 native matmul 限制 |
+| **B. Triton/CUTLASS 模板** | 默认、max-autotune | `TritonTemplateBuffer` / `CUTLASSTemplateBuffer` / `MultiTemplateBuffer` | Triton 模板、CUTLASS、NVGEMM 等 | prologue/epilogue 取决于模板的 `get_allowed_prologue_inps()` |
+| **C. Extern fallback** | 选了 `aten_handler = aten_mm` 或小矩阵自动 fallback | `ExternKernelChoice` → `ExternKernel` | PyTorch eager `aten.mm` | ❌ 不参与融合(仅 `UserDefinedTritonKernel` 是例外) |
+
+一个真实混合表达式在 Triton 后端通常长这样:
+
+```python
+def g_mixed(x, w, b):
+    h = (x.relu() * 2 + 1).sigmoid().tanh()    # 步骤 1: 一连串点 → 1 个 Pointwise IR
+    out = torch.matmul(h, w)                    # 步骤 2: matmul → 单独的 Reduction("dot")
+                                               #         或 TemplateBuffer
+    out = out + b + x                           # 步骤 3: 加 bias + 残差 → 又 1 个 Pointwise
+    return out
+```
+
+调度图(路径 A / 路径 B 都类似):
+
+```
+Pointwise#1 (relu*2+1+sigmoid+tanh)        ← 1 个 IR node,inner_fn 4 个 aten
+Reduction#1 / TemplateBuffer#1 (matmul)    ← 1 个 IR node,codegen 出 tl.dot / Triton 模板
+Pointwise#2 (out + b + x)                  ← 1 个 IR node,inner_fn 3 个 aten
+   ↑ 可作 matmul 的 epilogue,被融合进 matmul kernel
+```
+
+最终 fused kernels(典型):
+
+- **路径 A**:`kernel1`(Pointwise#1,~4 aten)+ `kernel2`(Reduction#1 + Pointwise#2 epilogue)——共 **2 个 Triton kernel**
+- **路径 B**:同上,但 kernel2 是 TritonTemplateBuffer 实例(max-autotune 下可能再细拆 prologue)
+- **路径 C**:kernel1(Pointwise#1)+ `kernel2`(extern mm)+ `kernel3`(Pointwise#2)——**3 个 kernel**,extern 不参与融合
+
+**关键差异对照**(接 §10.1.3 的 case 2):
+
+| 维度 | case 2 纯 Pointwise | case 2 加 matmul |
+|---|---|---|
+| `aten.mm` 在 lowering 表里 | — | `tuned_mm` in `kernel/mm.py:326` |
+| **产什么 IR?** | 1 个 `Pointwise` | 1 个 `Reduction("dot")` 或 1 个 `TritonTemplateBuffer` |
+| `make_pointwise` 包不包它? | ✅ 包 | ❌ **不包** |
+| `make_reduction` 包不包它? | ❌ | ✅(路径 A)或 ❌(路径 B) |
+| `max_fusion_size=64` 触发? | 不(只 1 个 IR) | 不(只 1 个 IR,但 IR 类型不同) |
+| prologue/epilogue 空间 | N/A(全是 Pointwise) | **有**(template/reduction 各有专属 epilogue 规则) |
+| `shared_data_score == 0` 拒? | N/A | prologue 方向若选不中(prologue 输入与模板要求不一致),`can_fuse` 拒 |
+
+**所以"加 matmul 后处理逻辑是什么"——三层回答**:
+
+1. **不进 Pointwise。** `aten.mm` 在 lowering 阶段直接走 `tuned_mm`,跟 `make_pointwise` 三条独立路径。
+2. **典型产出** = 1 个 `Reduction("dot")`(tl.dot 改写路径)或 1 个 `TemplateBuffer`(模板/Extern 路径)。
+   两种都**只占调度图 1 个 IR node**,所以 `max_fusion_size=64` 不会卡。
+3. **真正决定"几个 kernel"的是 prologue/epilogue 是否吃成**——这是 template kernel 的
+   `get_allowed_prologue_inps()` 与 `can_fuse_reduction_epilogue()` 接口在管,不是 `max_fusion_size`。
+
+> 一句话:**matmul 是天然的"不可融合屏障",但它自带 prologue/epilogue 接口,允许前 1 个
+> Pointwise 吃进来(prologue)、后 1 个 Pointwise 跟出去(epilogue)。这是 inductor 融合能力
+> 在非纯点链上的主要扩展机制。**
+
+#### 10.1.5 表达式本身就是 matmul 的输入时 —— prologue 融合详解
+
+> 继续追问:`torch.matmul((x.relu()*2+1).sigmoid().tanh(), w)` 还是 1 个 IR node 吗?
+
+**答:不是。** `tuned_mm`([`kernel/mm.py:326`](../../torch/_inductor/kernel/mm.py#L326))只接收
+两个 TensorBox 作为 `mat1`/`mat2`,**不"吞"前驱 Pointwise**;所以 lowering 阶段产出的是
+**2 个 IR node**:
+
+```
+Pointwise#1 (relu*2+1+sigmoid+tanh) → 1 个 IR node,inner_fn 4 个 aten
+TritonTemplateBuffer#1 (matmul)     → 1 个 IR node
+   ↑ Pointwise#1 的输出是 matmul 的输入(data dependency)
+```
+
+`ir_nodes_pre_fusion = 2`(`max_fusion_size=64` 不触发)。
+
+**真正的"1 个 kernel"在 scheduler 阶段通过 prologue 融合实现**([`scheduler.py:8852-8912`](../../torch/_inductor/scheduler.py#L8852-L8912))。
+
+##### prologue 融合判定链
+
+Scheduler 模板 prologue 10 条规则(§1.2 第 8 条)实际命中情况:
+
+| 规则 | 实际判定 |
+|---|---|
+| node2 是 template(mm 是 `TritonTemplateBuffer`) | ✅ |
+| node1 必须是 pointwise(node2 是 template,prologue 方向) | ✅ Pointwise#1 |
+| `_is_prologue_fusion_enabled(node2)` 默认开 | ✅ |
+| `allowed_prologue_inps` 含 node1 的 buffer 名 | **看模板定义**(见下) |
+| node1 无 alias/mutation | ✅ 纯函数 |
+| node1 最后输出**单使用者**且**只喂此 template** | ✅ |
+| tiling 兼容 | 通常 ✅ |
+
+关键参数 `allowed_prologue_inps` 来自模板([`select_algorithm.py:1029-1032`](../../torch/_inductor/select_algorithm.py#L1029-L1032)):
+
+```python
+for name in argnames:
+    input_node = self.named_input_nodes[name]
+    if self.prologue_loads_all_inputs:                # ← mm 模板:True
+        self.prologue_supported_inputs.add(input_node.get_name())
+```
+
+`mm_template` 在 [`kernel/mm.py:87-98`](../../torch/_inductor/kernel/mm.py#L87-L98) 设置
+`prologue_loads_all_inputs=True`——**所有 matmul 输入都允许 prologue 吃**。
+
+##### 3 种结局
+
+| 结局 | 触发条件 | fused kernel 数 | kernel body 实际 aten op |
+|---|---|:---:|---|
+| **prologue 吃成** ✅ | 所有规则通过 + 模板 `prologue_loads_all_inputs=True` | **1** | 5(pointwise 内联)+ 1 tl.dot |
+| **prologue 不吃, 2 个独立 kernel** | tiling 不兼容 / `_is_prologue_fusion_enabled=False` / `prologue_loads_all_inputs=False`(其他模板) | **2** | 4 + 1 |
+| **prologue 不吃 + matmul 走 extern fallback** | autotune 选 `aten_handler=aten_mm`(小矩阵) | **2-3** | 4 + extern mm |
+
+##### Triton template prologue 的实现机制
+
+`prologue_loads_all_inputs=True` 让 template kernel 在加载 `mat1`/`mat2` 时允许加载 pointwise
+节点产生的中间值。Codegen 时调度器把 Pointwise#1 的 `inner_fn` 内联插到 matmul kernel 之前:
+
+```python
+@triton.jit
+def fused_matmul_kernel(x_ptr, w_ptr, out_ptr, ...):
+    # prologue: Pointwise#1 的 inner_fn 内联展开
+    pid_m, pid_n = tl.program_id(0), tl.program_id(1)
+    h = tl.load(x_ptr + offs_m)         # raw 读
+    h = tl.maximum(h, 0.0)              # relu
+    h = h * 2.0                         # mul
+    h = h + 1.0                         # add
+    h = 1.0 / (1.0 + tl.exp(-h))        # sigmoid
+    h = (tl.exp(h) - tl.exp(-h)) / (tl.exp(h) + tl.exp(-h))  # tanh
+    # 主体 matmul
+    w = tl.load(w_ptr + offs_n)
+    acc = tl.dot(h, w)                  # tl.dot 取代独立 matmul kernel
+    tl.store(out_ptr + offs, acc)
+```
+
+——**一个 Triton kernel 体里同时跑了 5 个 Pointwise aten op + 1 个 tl.dot**。
+
+##### 不同模板的 prologue 策略
+
+模板是否接受 prologue 由模板自己的 `prologue_loads_all_inputs`/`allowed_prologue_inps` 决定:
+
+| 模板 | prologue 支持 | 来源 |
+|---|---|---|
+| `mm` (Triton template) | ✅ 所有输入都接受 | [`mm.py:87-98`](../../torch/_inductor/kernel/mm.py#L87-L98) `prologue_loads_all_inputs=True` |
+| `bmm` | ✅(类似 mm) | [`bmm.py`](../../torch/_inductor/kernel/bmm.py) |
+| CUTLASS 模板 | ❌ 显式拒绝 | [`cuda_combined_scheduling.py:172-173`](../../torch/_inductor/codegen/cuda_combined_scheduling.py#L172-L173) `"cutlass template does not support prologue nodes"` |
+| ROCm CPP 模板 | ❌ | [`cuda_combined_scheduling.py:182-184`](../../torch/_inductor/codegen/cuda_combined_scheduling.py#L182-L184) |
+| CuteDSL / FlyDSL / NVGEMM 模板 | ❌ | 同文件 193-211 |
+
+**所以 NPU/ROCm 上前驱 Pointwise 往往不被 matmul 吃成 prologue——这是 NPU 融合范围比 GPU
+小的另一条机制,叠在 §1-§5 的 NPU_EXTRA_FALLBACK_LIST 之上。**
+
+**给读者的提醒**——数"算子"之前先选口径:
+
+| 口径 | 谁数 | 工具 | 数量级 |
+|---|---|---|---|
+| Python 源码 | 你 | 数 `x.relu()` 等调用次数 | 100 / 7 |
+| FX graph(`make_fx` 后) | Dynamo + AOT | `traced.graph.nodes` | 100 / 7(此处两 case 一致) |
+| IR node(`ir_nodes_pre_fusion`) | inductor lowering | `metrics.ir_nodes_pre_fusion` | 100 / 1(差 100 倍) |
+| **调度 fused node** | scheduler | `metrics.generated_kernel_count` | 2 / 1 |
+| **Triton kernel body 内的 aten op** | codegen | 解析 `output_code_log` 数 `torch.X(` | ~50 / 7 |
+| **真正执行的 aten op 数(运行时)** | GPU kernel 执行 | profiling 工具(`nsys`/`torch.profiler`) | 与 kernel body 一致 |
+
+`max_fusion_size` 卡的是第 3 行(IR node)与第 4 行(fused node),不是第 5 行(kernel body)。
+**理解"上限"时务必先明确自己在哪一层数。**
+
 ### 10.2 `max_fusion_unique_io_buffers`(默认 None,[`config.py:1031`](../../torch/_inductor/config.py#L1031))
 
 当显式设置时(如 max-autotune 常给 32/48),`fusion_prevent_too_many_reads_and_writes`
