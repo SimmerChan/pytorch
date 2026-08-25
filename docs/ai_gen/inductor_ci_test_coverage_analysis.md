@@ -285,6 +285,46 @@ Blackwell max-autotune(11)、FP8 特定路径(42) —— 这些用例验证的�
 - 不回答"NPU 上 PyTorch inductor 实际能跑多少算子",那是 §5.3 的口径(opinfo 矩阵可过
   上界 62%~66% 是推算,真值同样需 device 注入校准)。
 
+#### 5.2.2 自建用例的图模式覆盖 与 "是否适配社区用例"的判定
+
+**图模式覆盖**: 在 torch_npu `test/_inductor/` 123 个 `test_*.py` 文件中, **103 个
+(83.7%)** 调用了 `torch.compile()` / `torch._dynamo` / `.optimize()` —— 绝大多数 NPU
+自建用例**确实是图模式测试**(测的是 inductor 后端能不能产出正确的 Triton kernel / fused
+graph,而不是测 eager 算子本身)。其余 20 个 (16.3%) 为 lowering/autotune/profile 的辅助
+测试(`test_lowering_device_dispatch.py`、`test_npu_aoti_shim.py`、`test_npu_static_kernel.py`、
+autotune_* 三个文件等),本身不依赖图模式。
+
+**与社区用例的 fork 关系判定**(基于 §5.2 元数据表 commit `0ef1735386` 的 `test/_inductor/`
+目录):
+
+| 端 | 文件数 |
+|---|---:|
+| 上游 `test/inductor/test_*.py` | 188 |
+| torch_npu `test/_inductor/test_*.py` | 123 |
+| **basename 严格相同** | **2** (`test_codecache.py`、`test_embedding.py`) |
+| 上游存在但 NPU 未 fork 的关键图模式测试 | `test_torchinductor.py`(975 方法)、`test_torchinductor_opinfo.py`(3,697 L4 实跑)、`test_torchinductor_dynamic_shapes.py`(64)、`test_torchinductor_opinfo_properties.py`、`test_torchinductor_codegen_dynamic_shapes.py`、`test_aot_inductor.py`(289)、`test_flex_attention.py`(220)、`test_flex_gemm.py`(242)、`test_cudagraph_trees.py`(211)、`test_compiled_autograd.py`(132)、`test_max_autotune.py`(137) 等 — **全部缺失** |
+| torch_npu 自建独有的 | 121 |
+
+两个"同名"文件内容对比:`test_codecache.py` 上游 5710 行 vs NPU 67 行(行数比 1.2%),
+`test_embedding.py` 上游继承 `TestCase` vs NPU 继承 `TestUtils`,且 NPU 文件带
+`# UT skip, reason: precision fail` 注释;**两个均非 fork,只是命名巧合**。
+
+**结论一 —— fork 适配数为 0**: NPU 后端的 inductor 看护 = 全部走自建,**没有适配
+社区用例**;自建用例虽然 83.7% 是图模式测试,但它们测的是"特定算子/特定 fusion
+在 NPU 后端能不能编出 kernel",**不替代社区"全 dtype 全 sample 全反向"的看护矩阵**。
+
+**结论二 —— 接入社区用例才是消除不确定性的唯一路径**: §6.1 的 device 注入机制
+(`TORCH_TEST_DEVICES` + `PYTORCH_TESTING_DEVICE_ONLY_FOR=privateuse1` + 自写
+NPUTestBase 桥接)能让上游 `test_torchinductor.py`、`test_torchinductor_opinfo.py` 等
+图模式测试**零 fork** 地在 NPU 上跑起来;用例本体不动、长期跟随社区演进 —— 这才是把
+"未测"变成"实测量"的唯一解。
+
+**结论三 —— 自建用例的图模式质量**: 83.7% 自建测试是图模式 ≠ 等价于"覆盖了社区用例"
+—— 自建用例参数化稀薄(每个 `test_<feature>.py` 通常 1-30 个方法,且少有 `@parametrize`),
+而社区用例靠 opinfo/dtype/device 实例化展开数千变体;自建图模式用例是"特定路径的烟测
++ 回归保护",**不是"用例矩阵覆盖率"**。这个区别解释了 §5.2.1 的核心警示:8.9% 投入
+密度回答的是"配比",社区全矩阵覆盖率的真值仍待 device 注入首次跑通后才可计算。
+
 按 §5 优先级累计 NPU 自建投入(静态口径): P0 67/1,263(5.3%) → +P1 210/655(32.1%) →
 +P2 282/1,724(16.4%) → +P3 363/4,162(8.7%) → 合计 **512/5,741(8.9%)**(另 35 个为
 域13 的昇腾自建等价用例;此为投入密度,非覆盖率)。
