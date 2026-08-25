@@ -223,7 +223,7 @@ Blackwell max-autotune(11)、FP8 特定路径(42) —— 这些用例验证的�
 | 端 | 仓库 | 分支 | Commit | Commit 时间 | 扫描方式 |
 |---|---|---|---|---|---|
 | NPU | gitcode.com/Ascend/pytorch (torch_npu) | master | `0ef1735386` | 2026-08-24 08:58:52 +0800 | 静态扫描 `test/_inductor/` 126 个自建测试文件 |
-| GPU (对照) | github.com/pytorch/pytorch | trunk | `165426143e` (L4 CI run 32193788776) | 2026-08-18 | L4 CI junit 实跑报告,见《torchinductor_test_inventory.md》第 7 节 |
+| GPU (对照) | github.com/pytorch/pytorch | **master** | `165426143e` (L4 CI run 32193788776) | 2026-08-18 | 由 `.github/workflows/trunk.yml`(nightly) 这条 workflow 跑出来的 L4 junit 实跑报告;代码点 = `master` 分支 2026-08-18 的快照,见《torchinductor_test_inventory.md》第 7 节 |
 
 把 NPU `test/_inductor/` 下文件按功能逐个归入 §2 的 13 域(脚本
 `agent_space/map_npu_to_domains.py`),与 §5.1 的上游双口径对照:
@@ -357,7 +357,7 @@ test_torchinductor_opinfo.py,而是按特性自建 test_*.py。
 | 端 | 仓库 | 分支 | Commit | Commit 时间 | 备注 |
 |---|---|---|---|---|---|
 | NPU | gitcode.com/u011801161/pytorch (fork of Ascend/pytorch) | master | `423b9a437a` | 2026-08-24 14:11:18 +0800 | 比 §5.2 引用的 upstream `0ef1735386` 晚 5h13min,期间 NPU 自建用例数从 547 收敛至 481(分子下降 12%);若需与 §5.2 严格对齐应重 fetch 上游 |
-| GPU (对照) | github.com/pytorch/pytorch | trunk | `165426143e` (L4 CI run 32193788776) | 2026-08-18 | L4 CI junit 实跑报告,见《torchinductor_test_inventory.md》第 7 节 |
+| GPU (对照) | github.com/pytorch/pytorch | **master** | `165426143e` (L4 CI run 32193788776) | 2026-08-18 | 由 `.github/workflows/trunk.yml`(nightly) 这条 workflow 跑出来的 L4 junit 实跑报告;代码点 = `master` 分支 2026-08-18 的快照,见《torchinductor_test_inventory.md》第 7 节 |
 
 把 NPU 自建文件按 `GROUPS` 同一套 13 域规则归类后,得到域级对比:
 
@@ -468,7 +468,8 @@ CANN 完整包(含 `aicpu_kernel` 与 `runtime`)后再校准;具体最小可运�
   `agent_space/opinfo_npu_overlap.py`(§5.3 opinfo 矩阵 x NPU fallback 清单交集,
   需本地存在 torch_npu 仓与 L4 junit 报告)、`agent_space/coverage_domain_compare.py`
   (§5.4 13 域 GPU 静态/实跑 vs NPU 自建用例, 同上需本地存在 torch_npu 仓与 L4 junit 报告);
-- GPU 实跑数(§5.1):trunk CI run 32193788776(commit 165426143e,2026-08-18)的
-  L4 junit artifact,按 skip 原因/优先级分组解析,见《torchinductor_test_inventory.md》第 7 节;
+- GPU 实跑数(§5.1):`master` 分支 nightly trunk workflow 的 L4 CI run 32193788776
+  (commit `165426143e`,2026-08-18)的 L4 junit artifact,按 skip 原因/优先级分组解析,
+  见《torchinductor_test_inventory.md》第 7 节;
 - 已知局限:静态方法数不含运行时展开(opinfo/dtype/device 实例化),用于相对比较与优先级
   排序,不用于绝对工作量核算;精确用例数需在可运行环境 `pytest --collect-only` 获取。
