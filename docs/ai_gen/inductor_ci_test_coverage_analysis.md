@@ -218,8 +218,14 @@ Blackwell max-autotune(11)、FP8 特定路径(42) —— 这些用例验证的�
 
 ### 5.2 NPU 现状基线 (torch_npu 已适配什么)
 
-数据源: gitcode.com/Ascend/pytorch (torch_npu) master@0ef1735386 静态扫描;把其
-`test/_inductor/` 126 个自建测试文件按功能逐个归入 §2 的 13 域(脚本
+数据源元数据:
+
+| 端 | 仓库 | 分支 | Commit | Commit 时间 | 扫描方式 |
+|---|---|---|---|---|---|
+| NPU | gitcode.com/Ascend/pytorch (torch_npu) | master | `0ef1735386` | 2026-08-24 08:58:52 +0800 | 静态扫描 `test/_inductor/` 126 个自建测试文件 |
+| GPU (对照) | github.com/pytorch/pytorch | trunk | `165426143e` (L4 CI run 32193788776) | 2026-08-18 | L4 CI junit 实跑报告,见《torchinductor_test_inventory.md》第 7 节 |
+
+把 NPU `test/_inductor/` 下文件按功能逐个归入 §2 的 13 域(脚本
 `agent_space/map_npu_to_domains.py`),与 §5.1 的上游双口径对照:
 
 | 特性域(§2) | 优先级 | 上游静态 | 上游 CUDA 实跑 | NPU 自建 | 投入密度(自建/上游静态) |
@@ -344,8 +350,16 @@ op/dtype 解析);NPU 侧取 torch_npu master 的 `NPU_EXTRA_FALLBACK_LIST` 与�
 
 `§5.3` 只看 opinfo 矩阵一个子集,但 GPU 13 域有 **6,342 静态方法 / 23,668 L4 实跑用例**
 (`agent_space/coverage_domain_compare.py`,同样口径 §5.1);NPU 侧没有 1:1 fork
-test_torchinductor_opinfo.py,而是按特性自建 test_*.py。把 NPU 自建文件按 `GROUPS` 同一套
-13 域规则归类后,得到域级对比:
+test_torchinductor_opinfo.py,而是按特性自建 test_*.py。
+
+数据源元数据:
+
+| 端 | 仓库 | 分支 | Commit | Commit 时间 | 备注 |
+|---|---|---|---|---|---|
+| NPU | gitcode.com/u011801161/pytorch (fork of Ascend/pytorch) | master | `423b9a437a` | 2026-08-24 14:11:18 +0800 | 比 §5.2 引用的 upstream `0ef1735386` 晚 5h13min,期间 NPU 自建用例数从 547 收敛至 481(分子下降 12%);若需与 §5.2 严格对齐应重 fetch 上游 |
+| GPU (对照) | github.com/pytorch/pytorch | trunk | `165426143e` (L4 CI run 32193788776) | 2026-08-18 | L4 CI junit 实跑报告,见《torchinductor_test_inventory.md》第 7 节 |
+
+把 NPU 自建文件按 `GROUPS` 同一套 13 域规则归类后,得到域级对比:
 
 | 域 | GPU 静态 | GPU L4 实跑 | NPU 自建用例 | NPU/GPU 静态 |
 |---|---:|---:|---:|---:|
