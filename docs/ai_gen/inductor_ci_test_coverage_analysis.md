@@ -31,7 +31,10 @@
    547 用例覆盖 12/13 域(域级投入密度口径 8.9%,**非适配覆盖率** —— 真覆盖率需 device 注入
    跑社区用例后统计,当前未测),其中 **P0 正确性基线投入最薄(静态 5.3%,按上游实跑分母约
    1%)**、动态形状 69.9%;外围层(opinfo/核心套件/dynamo)已 fork 适配 8,239+41 项 ——
-   **外围强、后端弱,inductor 后端从零接入**。
+   **外围强、后端弱,inductor 后端从零接入**。以上分母为 2026-08 master 口径;按
+   torch_npu 2.10.0.post1 同代上游 v2.10.0(143 文件/3,978 方法)修正,全量密度
+   **13.8%**、应适配口径 **14.7%**,版本锁定 v2.10.x 的静态应适配基线为 **3,493 个
+   方法**(§5.2.3)。
 5. GPU/NPU 定量对比(§5.3 + §5.4): §5.3 opinfo 矩阵推算——以 GPU 可跑面 3,015 项为基准,
    **NPU 可过上界 62%~66%,已知必然缺口(fallback 清单)15%~21%,fp64 风险 17%~18%**;
    fallback 清单已从 221 算子收敛至 136,每收敛一个概念算子平均恢复约 4.7 项。§5.4 域级
@@ -393,7 +396,104 @@ test_torch 442 等),适配方式为 cuda→npu / onlyCUDA→onlyPRIVATEUSE1 文�
 
 局限: NPU 侧 547 为静态口径(自建用例参数化少,静态≈执行量级);上游列与 §5.1 同源
 (TSV 快照 + CI run 32193788776);torch_npu 实际 CI 执行数(gitcode CI 按耗时拆分多机)
-仓内不可见,未计入。
+仓内不可见,未计入。另注意本表分母为 2026-08 master 口径,与 torch_npu 2.10.0.post1
+并非同代 —— 同代(v2.10.0)分母下的修正见 §5.2.3。
+
+#### 5.2.3 v2.10.0 同代分母对照(修正投入密度的代际错位)
+
+数据源元数据: github.com/pytorch/pytorch tag `v2.10.0` = commit `449b1768410104`
+(2026-01-15 19:29:35 -0500),`git archive` 导出该时点 `test/inductor/`(143 个
+`test_*.py`)至 `agent_space/v2100/`(git-ignored),统计脚本
+`agent_space/count_v2100_inductor.py` —— AST 口径与 `count_inductor_tests.py`
+完全一致,13 域分组沿用同一套 `GROUPS` 规则。逐用例清单(特性域/文件名/方法名三列,
+3,978 行)见 [v2100_inductor_test_cases.csv](v2100_inductor_test_cases.csv)
+(生成脚本 `agent_space/dump_v2100_cases.py`)。
+
+**为什么需要同代对照**: torch_npu 2.10.0.post1 对应的上游正是 v2.10.0,而 §5.2 /
+§5.4 的投入密度分母取 2026-08 master(6,342/6,375) —— 分子(NPU 自建,对应 v2.10.0
+时代)与分母(master)相差 7 个月。master 的 inductor 测试集 7 个月膨胀 +60%,分母被
+放大,**密度被系统性低估约 1.6 倍**。
+
+总量对照:
+
+| | v2.10.0 | 当前 main 快照 | Δ(7 个月) |
+|---|---:|---:|---:|
+| 测试文件 | **143** | 188 | +45 |
+| 静态方法 | **3,978** | 6,375 | +2,397 (+60.4%) |
+| @parametrize 条目 | 2,006 | 2,872 | +866 |
+
+v2.10.0 的 13 域静态统计(main 列为 GROUPS 184 文件口径):
+
+| # | 特性域 | v2.10 文件 | **v2.10 方法** | main 方法 | Δ |
+|---|---|---:|---:|---:|---:|
+| 1 | 算子级正确性基线 | 12 | **911** | 1,263 | -352 |
+| 2 | 融合与调度 | 17 | **186** | 532 | -346 |
+| 3 | FlexAttention 家族 | 3 | **248** | 604 | -356 |
+| 4 | AOTI 与 C++ 封装 | 11 | **318** | 436 | -118 |
+| 5 | 缓存与并行编译 | 11 | **177** | 425 | -248 |
+| 6 | Autotune 与 GEMM 模板 | 20 | **263** | 403 | -140 |
+| 7 | CUDA Graphs 与运行时 | 3 | **160** | 341 | -181 |
+| 8 | Autograd 与训练 | 8 | **272** | 325 | -53 |
+| 9 | Triton 代码生成 | 6 | **113** | 266 | -153 |
+| 10 | 动态形状 | 3 | **81** | 123 | -42 |
+| 11 | 分布式 | 2 | **22** | 50 | -28 |
+| 12 | 调试与工具链 | 26 | **742** | 973 | -231 |
+| 13 | 厂商/后端专属 | 15 | **436** | 601 | -165 |
+| — | 未归类(v2.10.0 独有文件) | 6 | 49 | — | — |
+| — | **全量** | **143** | **3,978** | 6,375 | -2,397 |
+
+关键文件当时的规模: test_torchinductor.py **753**(main 975)、test_aot_inductor
+**253**(289)、test_cudagraph_trees **157**(211)、test_flex_attention **172**(220)、
+test_compiled_autograd **125**(132)、test_codecache **67**(142)、
+test_torchinductor_opinfo **1**(harness,运行时 opinfo 展开,口径不变)。main 上 46
+个文件当时不存在,大头 test_flex_gemm(242)、test_nested_reduction(92)、
+test_user_streams(82)、test_nv_universal_gemm(49) 等;v2.10.0 亦有 6 个后来被删/
+重构的独有文件(test_static_cuda_launcher 17、test_multi_kernel 14、
+test_segmented_tree 12 等,共 49 方法)。
+
+**同代分母下的投入密度修正**(分子沿用 §5.2 的 NPU 自建数):
+
+| 域 | NPU 自建 | 同代分母(v2.10.0) | 同代密度 | 原密度(master 分母) |
+|---|---:|---:|---:|---:|
+| 算子级正确性基线 (P0) | 67 | 911 | **7.4%** | 5.3% |
+| 动态形状 (P1) | 86 | 81 | **106%** | 69.9% |
+| 融合与调度 (P1) | 124 | 186 | **66.7%** | 23.3% |
+| Triton 代码生成 (专项) | 82 | 113 | **72.6%** | 30.8% |
+| CUDAGraphs 与运行时 (P2) | 47 | 160 | **29.4%** | 13.8% |
+| AOTI 与 C++ 封装 (P3) | 56 | 318 | **17.6%** | 12.8% |
+| Autotune (P2) | 22 | 263 | **8.4%** | 5.5% |
+| 调试与工具链 (P3) | 17 | 742 | **2.3%** | 1.7% |
+| Autograd 与训练 (P2) | 3 | 272 | **1.1%** | 0.9% |
+| FlexAttention (P3) | 5 | 248 | **2.0%** | 0.8% |
+| 缓存与并行编译 (P3) | 3 | 177 | **1.7%** | 0.7% |
+| 分布式 (专项) | 0 | 22 | 0% | 0% |
+| 厂商/后端专属 | 35 | 436 | 8.0% | — |
+| **全量** | **547** | **3,978** | **13.8%** | 8.6% |
+
+(§5.3.1 的 481 分子口径下同代全量为 481/3,978 = 12.1%;应适配口径 512/
+(3,978-436-49=3,493) = 14.7%,对应原 512/5,741 = 8.9%。)
+
+三点解读:
+
+- **方向不变、幅度修正**: P0 仍是最短板之一(7.4%),FlexAttention/Autograd/缓存/
+  调试仍几近空白(≤2.3%);但"NPU 落后程度"此前被 master 膨胀放大约 1.6 倍,横向
+  对外引用密度时**应优先用同代口径 13.8%**,避免低估 NPU 现有投入;
+- **动态形状 106% 的警示意义**: NPU 自建(86)反超上游当时规模(81)—— 再次印证
+  §5.2.1 的口径警示:分子分母非同源用例,>100% 本身就说明该比值只能看配比、不能
+  看覆盖;
+- **版本锁定后的工作量基线**: 若 NPU 适配目标锁定 v2.10.x(torch_npu
+  2.10.0.post1 同代),静态应适配基线是 **3,493 个方法**(3,978 扣厂商专属 436 与
+  未归类 49),而非 master 的 5,741 —— 工作量口径直接缩小 39%。
+
+**v2.10.0 的 GPU CI 佐证(release 侧,§5.1.1 之外)**: `release/2.10` push 触发了
+3 个 inductor workflow run —— [run 21051242863](https://github.com/pytorch/pytorch/actions/runs/21051242863)
+`inductor`(51 job):NVIDIA A10G 上 `inductor` 1-2/2 两个核心单测 shard、
+cpp_wrapper 1-2/2、inductor_distributed、timm/torchbench/huggingface 性能全
+success,唯一失败是 CPU 侧 `inductor-pallas-cpu`;[run 21051242790](https://github.com/pytorch/pytorch/actions/runs/21051242790)
+(mi200)与 [run 21051242815](https://github.com/pytorch/pytorch/actions/runs/21051242815)
+(mi300)各有 shard 2/2 失败。该 run artifacts=0、job 日志已 HTTP 410 过期 ——
+**用例级 junit 不可得,仅 job 级结论可引用**(即本文 §5.1 的用例级 L4 基线无法用
+v2.10.0 复刻,只能取其同代静态口径 + job 级"GPU 端单测全过"结论)。
 
 ### 5.3 GPU/NPU opinfo 矩阵的定量覆盖率对比 (推算口径)
 
@@ -529,7 +629,10 @@ CANN 完整包(含 `aicpu_kernel` 与 `runtime`)后再校准;具体最小可运�
   可过上界 62%~66%,必然缺口 15%~21%,fp64 风险 17%~18%;域级实测(§5.4):NPU 481 / GPU 6,342
   静态 = 7.6%,NPU 481 / GPU 23,668 L4 实跑 = 2.0%;二者口径互补(opinfo 矩阵可过上界 vs
   静态自建覆盖深度);192.168.9.145 NPU 实测校准因缺 CANN runtime/kernel 而落空(§5.5),需
-  补装后用 device 注入机制收基线数;
+  补装后用 device 注入机制收基线数;同代分母修正(§5.2.3):以 torch_npu 2.10.0.post1
+  对应的 v2.10.0(3,978 方法)为分母,全量密度修正为 13.8%、应适配 14.7%,版本锁定
+  v2.10.x 的静态应适配基线为 3,493 个方法(v2.10.0 的 GPU CI 仅 job 级结论可引用,
+  用例级 junit 已随日志/artifact 过期不可得);
 - 落地机制:device 注入 + 受控 skip 列表 + 分层通过率汇报,与融合广度缺口清单合并成统一
   的 P0 任务列表,实现对研发的持续倒逼。
 
@@ -549,7 +652,9 @@ CANN 完整包(含 `aicpu_kernel` 与 `runtime`)后再校准;具体最小可运�
   (§5.2 torch_npu 测试到 13 域的映射,需本地存在 torch_npu 仓)、
   `agent_space/opinfo_npu_overlap.py`(§5.3 opinfo 矩阵 x NPU fallback 清单交集,
   需本地存在 torch_npu 仓与 L4 junit 报告)、`agent_space/coverage_domain_compare.py`
-  (§5.4 13 域 GPU 静态/实跑 vs NPU 自建用例, 同上需本地存在 torch_npu 仓与 L4 junit 报告);
+  (§5.4 13 域 GPU 静态/实跑 vs NPU 自建用例, 同上需本地存在 torch_npu 仓与 L4 junit 报告)、
+  `agent_space/count_v2100_inductor.py`(§5.2.3 v2.10.0 同代分母统计, 数据源为
+  `git archive 449b1768 test/inductor` 导出的 `agent_space/v2100/`);
 - GPU 实跑数(§5.1):`master` 分支 PR ciflow L4 self-hosted runner
   (`mt-l-x86aavx2-29-113-l4-*`)的 14 个 `agent_space/l4_reports/*.zip` junit 聚合
   (NVIDIA L4,2026-08 当周),按 skip 原因/优先级分组解析,见《torchinductor_test_inventory.md》第 7 节;
