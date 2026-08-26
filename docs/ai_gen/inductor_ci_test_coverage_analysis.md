@@ -405,8 +405,8 @@ test_torch 442 等),适配方式为 cuda→npu / onlyCUDA→onlyPRIVATEUSE1 文�
 (2026-01-15 19:29:35 -0500),`git archive` 导出该时点 `test/inductor/`(143 个
 `test_*.py`)至 `agent_space/v2100/`(git-ignored),统计脚本
 `agent_space/count_v2100_inductor.py` —— AST 口径与 `count_inductor_tests.py`
-完全一致,13 域分组沿用同一套 `GROUPS` 规则。逐用例清单(特性域/文件名/方法名三列,
-3,978 行)见 [v2100_inductor_test_cases.csv](v2100_inductor_test_cases.csv)
+完全一致,13 域分组沿用同一套 `GROUPS` 规则。逐用例清单(特性域/文件相对路径/方法名三列,
+3,978 行,utf-8-sig 编码)见 [v2100_inductor_test_cases.csv](v2100_inductor_test_cases.csv)
 (生成脚本 `agent_space/dump_v2100_cases.py`)。
 
 **为什么需要同代对照**: torch_npu 2.10.0.post1 对应的上游正是 v2.10.0,而 §5.2 /
