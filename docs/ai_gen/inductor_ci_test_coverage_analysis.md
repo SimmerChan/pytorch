@@ -184,7 +184,7 @@ Blackwell max-autotune(11)、FP8 特定路径(42) —— 这些用例验证的�
 | 专项 | 分布式(多卡) | distributed_patterns(20)、symm_mem_registry(19) 等 50 | 多卡/集合通信编译,依赖昇腾 HCCL 专项 | 单卡主线外,按多卡版本节奏单独接入 |
 | **不做** | 厂商专属 | CUTLASS(91)、Pallas(119)、CuTeDSL(65)、NV GEMM(49)、Blackwell(11)、FP8 特定(42)、MPS/XPU/Halide 等 | — | 改为**昇腾等价自建用例**(自有 GEMM 模板、FP8 方案)看护,接口对齐社区 |
 
-### 5.1 各优先级的实测用例数(L4 CUDA CI, run 32193788776, commit 165426143e)
+### 5.1 各优先级的实测用例数(数据源: GPU ciflow L4 self-hosted runner, j 2026-08 当周)
 
 静态方法数按 §2 的 13 域分组重算(当前 `inductor_test_counts.tsv`,184 个 `test_*.py` 共
 6,342,与 §2 的 6,375 有快照差异);CUDA 实跑 = 该 run junit 中实际执行的用例数(含 skip,
@@ -216,6 +216,46 @@ Blackwell max-autotune(11)、FP8 特定路径(42) —— 这些用例验证的�
 - TD 未覆盖的 97 个应适配文件属本 commit 影响面之外(多为小文件/工具链),全量执行时
   会补齐,分层占比基本不变。
 
+#### 5.1.1 GPU 端实测的 pass / skip 分布(以 trunk push run 32193788776 为对照)
+
+为澄清"§5.1 看到的 23,668 L4 实跑用例"与"run 32193788776 是哪种 CI"的对应关系,
+从 GitHub Actions 拉取 [run 32193788776](https://github.com/pytorch/pytorch/actions/runs/32193788776)
+的两个 inductor shard test-reports artifact(artifacts 9349474542 / 9349603314,共 1.99 MB)
+做 junit 解析。**关键事实: 该 run 实际跑在 AMD ROCm gfx950 self-hosted runner
+(`linux.rocm.gpu.gfx950`),不是 NVIDIA L4**——head_branch 是 PyTorch 内部的
+`ciflow/trunk/193902` tag 触发的 trunk push workflow,与 §5.1 用到的 14 个
+`agent_space/l4_reports/*.zip`(host = `mt-l-x86aavx2-29-113-l4-*` self-hosted L4 runners,
+真正的 NVIDIA L4)是**两套独立的数据源**;`23,668` 这个分母来自后者,不应误读为 run
+32193788776 的产出。
+
+run 32193788776 的两个 inductor shard 实测统计:
+
+| Shard | Total tests | Skipped | Failures | Errors | Real executed | Passed | Pass rate (real exec) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| test-inductor-1-2 | 20,598 | 10,111 | 0 | 0 | 10,487 | 10,487 | **100.0%** |
+| test-inductor-2-2 | 18,585 | 8,659 | 0 | 0 | 9,926 | 9,926 | **100.0%** |
+| **合计** | **39,183** | **18,770** | **0** | **0** | **20,413** | **20,413** | **100.0%** |
+
+skip 原因 top 5(`inductor-1-2` + `inductor-2-2` 汇总,共 18,770 条):
+
+| skip 计数 | skip 消息 |
+|---:|---|
+| 14,198 | "Takes too long for inductor" (PyTorch CI 在 gfx950 runner 上对 inductor 测试的超时长跳) |
+| 1,102 | "fewer than 2 devices detected" (多卡测试在单卡 runner 上被 skip) |
+| 953 | "Skipped!" |
+| 398 | "Only runs on cpu" |
+| 353 | "No MPS backend available" |
+
+**结论一**: 在 gfx950 runner 上**实跑的 20,413 个 inductor testcases 100% 通过**;
+社区 trunk CI 对 gfx950 平台的看护**全过、零失败**。这与 L4 self-hosted runner 上的
+情况应类似(§5.1 的 23,668 L4 用例同样视作"实跑全过",其分层 skip 数已在 §5.1 表格中
+按域拆分)。
+
+**结论二**: "GPU 端 100% 通过"**不等于"NPU 也能 100% 通过**——这是两个不同硬件后端,
+且本数字只反映"在 gfx950 上能跑的 inductor 子集",**不含 NVIDIA-only / CUDA-only
+路径**(这些被"Only runs on cpu"、"Takes too long"等规则跳过);反推到 NPU 上能跑
+的子集更小,且 NPU 后端需重做一遍 device 注入实测(§6.1)。
+
 ### 5.2 NPU 现状基线 (torch_npu 已适配什么)
 
 数据源元数据:
@@ -223,7 +263,8 @@ Blackwell max-autotune(11)、FP8 特定路径(42) —— 这些用例验证的�
 | 端 | 仓库 | 分支 | Commit | Commit 时间 | 扫描方式 |
 |---|---|---|---|---|---|
 | NPU | gitcode.com/Ascend/pytorch (torch_npu) | master | `0ef1735386` | 2026-08-24 08:58:52 +0800 | 静态扫描 `test/_inductor/` 126 个自建测试文件 |
-| GPU (对照) | github.com/pytorch/pytorch | **master** | `165426143e` (L4 CI run 32193788776) | 2026-08-18 | 由 `.github/workflows/trunk.yml`(nightly) 这条 workflow 跑出来的 L4 junit 实跑报告;代码点 = `master` 分支 2026-08-18 的快照,见《torchinductor_test_inventory.md》第 7 节 |
+| GPU (对照, 主源) | github.com/pytorch/pytorch (PR ciflow L4) | master 多 PR 聚合 | `agent_space/l4_reports/` 14 个 zip 聚合(host = `mt-l-x86aavx2-29-113-l4-*` self-hosted runners,真实 NVIDIA L4) | 2026-08 当周 | 见《torchinductor_test_inventory.md》第 7 节 |
+| GPU (对照, 辅源) | github.com/pytorch/pytorch (trunk push CI on ROCm gfx950) | `ciflow/trunk/193902` tag | `165426143e` ([run 32193788776](https://github.com/pytorch/pytorch/actions/runs/32193788776)) | 2026-08-18 | trunk workflow push 触发,实际跑在 AMD ROCm gfx950 self-hosted runner 上(`linux.rocm.gpu.gfx950`),**不是 NVIDIA L4**;只用作"GPU 端实跑是否全过"的对照 |
 
 把 NPU `test/_inductor/` 下文件按功能逐个归入 §2 的 13 域(脚本
 `agent_space/map_npu_to_domains.py`),与 §5.1 的上游双口径对照:
@@ -397,11 +438,12 @@ test_torchinductor_opinfo.py,而是按特性自建 test_*.py。
 | 端 | 仓库 | 分支 | Commit | Commit 时间 | 备注 |
 |---|---|---|---|---|---|
 | NPU | gitcode.com/u011801161/pytorch (fork of Ascend/pytorch) | master | `423b9a437a` | 2026-08-24 14:11:18 +0800 | 比 §5.2 引用的 upstream `0ef1735386` 晚 5h13min,期间 NPU 自建用例数从 547 收敛至 481(分子下降 12%);若需与 §5.2 严格对齐应重 fetch 上游 |
-| GPU (对照) | github.com/pytorch/pytorch | **master** | `165426143e` (L4 CI run 32193788776) | 2026-08-18 | 由 `.github/workflows/trunk.yml`(nightly) 这条 workflow 跑出来的 L4 junit 实跑报告;代码点 = `master` 分支 2026-08-18 的快照,见《torchinductor_test_inventory.md》第 7 节 |
+| GPU (对照, 主源) | github.com/pytorch/pytorch (PR ciflow L4) | master 多 PR 聚合 | `agent_space/l4_reports/` 14 个 zip 聚合(host = `mt-l-x86aavx2-29-113-l4-*` self-hosted runners,真实 NVIDIA L4) | 2026-08 当周 | 见《torchinductor_test_inventory.md》第 7 节 |
+| GPU (对照, 辅源) | github.com/pytorch/pytorch (trunk push CI on ROCm gfx950) | `ciflow/trunk/193902` tag | `165426143e` ([run 32193788776](https://github.com/pytorch/pytorch/actions/runs/32193788776)) | 2026-08-18 | trunk workflow push 触发,实际跑在 AMD ROCm gfx950 self-hosted runner 上(`linux.rocm.gpu.gfx950`),**不是 NVIDIA L4**;只用作"GPU 端实跑是否全过"的对照 |
 
 把 NPU 自建文件按 `GROUPS` 同一套 13 域规则归类后,得到域级对比:
 
-| 域 | GPU 静态 | GPU L4 实跑 | NPU 自建用例 | NPU/GPU 静态 |
+| 域 | GPU 静态 | GPU L4 实跑 (主源) | NPU 自建用例 | NPU/GPU 静态 |
 |---|---:|---:|---:|---:|
 | 算子级正确性基线 (P0) | 1,263 | 6,427 | 67 | **5.3%** |
 | 动态形状 (P1) | 123 | 5,776 | 86 | **69.9%** |
@@ -508,8 +550,10 @@ CANN 完整包(含 `aicpu_kernel` 与 `runtime`)后再校准;具体最小可运�
   `agent_space/opinfo_npu_overlap.py`(§5.3 opinfo 矩阵 x NPU fallback 清单交集,
   需本地存在 torch_npu 仓与 L4 junit 报告)、`agent_space/coverage_domain_compare.py`
   (§5.4 13 域 GPU 静态/实跑 vs NPU 自建用例, 同上需本地存在 torch_npu 仓与 L4 junit 报告);
-- GPU 实跑数(§5.1):`master` 分支 nightly trunk workflow 的 L4 CI run 32193788776
-  (commit `165426143e`,2026-08-18)的 L4 junit artifact,按 skip 原因/优先级分组解析,
-  见《torchinductor_test_inventory.md》第 7 节;
+- GPU 实跑数(§5.1):`master` 分支 PR ciflow L4 self-hosted runner
+  (`mt-l-x86aavx2-29-113-l4-*`)的 14 个 `agent_space/l4_reports/*.zip` junit 聚合
+  (NVIDIA L4,2026-08 当周),按 skip 原因/优先级分组解析,见《torchinductor_test_inventory.md》第 7 节;
+  **不要与 run 32193788776(2026-08-18)混淆**——后者是 trunk push 触发的 ROCm gfx950 runner,
+  20,413 实跑 testcases 100% 通过(详见 §5.1.1);
 - 已知局限:静态方法数不含运行时展开(opinfo/dtype/device 实例化),用于相对比较与优先级
   排序,不用于绝对工作量核算;精确用例数需在可运行环境 `pytest --collect-only` 获取。
