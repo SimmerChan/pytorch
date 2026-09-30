@@ -1,7 +1,7 @@
 # Inductor Triton codegen 对 Triton 扩展机制的使用分析(含 Meta TLX)
 
-> 回答问题:Inductor 在 codegen 生成 Triton 算子时,会不会使用 Triton 的插件机制和扩展接口(例如 Meta 的 TLX,问题中写作 "utlx",PyTorch 内部称 torchTLX)?
-> 分析基于 PyTorch 主仓 `torch/_inductor/`(main 分支,commit `584f4d806a9`,2026-09-30)。
+> 回答两个问题:1) Inductor 在 codegen 生成 Triton 算子时,会不会使用 Triton 的插件机制和扩展接口(例如 Meta 的 TLX / utlx,PyTorch 内部集成代号 torchTLX);2) PyTorch 官方社区对这条路线是否有明确的路标支持计划。
+> 分析基于 PyTorch 主仓 `torch/_inductor/`(main 分支,commit `584f4d806a9`,2026-09-30);路标调研信息更新至 2026-09-30。
 
 ---
 
@@ -10,11 +10,12 @@
 - [0. TL;DR](#0-tldr)
 - [1. 总体结论](#1-总体结论)
 - [2. torchTLX(Meta TLX)集成详解](#2-torchtlxmeta-tlx集成详解)
-- [3. 其他 Triton 官方扩展接口的使用](#3-其他-triton-官方扩展接口的使用)
-- [4. Inductor 自身暴露的对称插件口子](#4-inductor-自身暴露的对称插件口子)
-- [5. 边界与设计意图](#5-边界与设计意图)
-- [6. 关键代码索引速查表](#6-关键代码索引速查表)
-- [7. 复现方法](#7-复现方法)
+- [3. 官方路标:是否有明确的支持计划](#3-官方路标是否有明确的支持计划)
+- [4. 其他 Triton 官方扩展接口的使用](#4-其他-triton-官方扩展接口的使用)
+- [5. Inductor 自身暴露的对称插件口子](#5-inductor-自身暴露的对称插件口子)
+- [6. 边界与设计意图](#6-边界与设计意图)
+- [7. 关键代码索引速查表](#7-关键代码索引速查表)
+- [8. 复现方法](#8-复现方法)
 
 ---
 
@@ -23,6 +24,7 @@
 - **会,而且是双重的**:Inductor 大量使用 Triton 的官方扩展接口;同时上游 main 已合入与 Meta TLX(torchTLX)的正式集成。
 - **TLX 的模板本体不在 PyTorch 仓库里**,而在 Meta 的 Triton fork(fbtriton / triton-beta)中。PyTorch 只提供开关(`tlx_mode`)、挂载点(`inductor_choices_class`)和参数白名单注入;所有相关 import 均 try/except `ImportError`,装标准 pip Triton 时 TLX 完全不生效,行为不变。
 - 常规 pointwise/reduction codegen 生成的通用 kernel 仍然是保守的标准 `tl.*` 代码;TLX 等低层原语只在 max-autotune 模板路径(FlexAttention、persistent matmul)介入,极致性能的另一条路走 CUTLASS/extern 库,不经 Triton。
+- **官方路标明确**:PyTorch-Triton 3.7 正式引入 Triton Plugin Extensions 系统,TLX 以 out-of-tree 插件(utlx)形式开箱即用,并承诺后续所有 Triton 发行版默认启用;release feature 跟踪单 #178917 已 CLOSED / COMPLETED(见 §3)。
 
 ---
 
@@ -36,7 +38,7 @@
 | Meta TLX(torchTLX) | 是,插件式 | Triton fork 侧注册,PyTorch 侧 `tlx_mode` 三态开关,默认关闭 |
 | 多后端(CPU/XPU/ROCm/厂商 fork) | 是 | 消费 Triton 的 backend entry-point / driver 抽象 |
 
-术语澄清:问题中的 "utlx" 对应 Meta 的 **TLX(Triton Low-Level eXtensions)**,早期仓库为 pytorch-labs/triton-x,现由 fbtriton(triton-beta)承载;PyTorch 侧集成代号 **torchTLX**。
+术语澄清:**TLX(Triton Low-Level eXtensions)** 是 Meta 开发的 Triton 语言扩展本身;**utlx(uTLX)** 是 TLX 以 out-of-tree 插件形式发布时的包名(`triton-lang/triton-ext` 仓库的 `extensions/utlx`,PyPI 包 `triton-utlx`),并非笔误。早期 TLX 由 pytorch-labs/triton-x 承载,后迁至 fbtriton(triton-beta);PyTorch 侧集成代号 **torchTLX**。自 PyTorch-Triton 3.7 起,TLX 也可经 Triton Plugin Extensions 机制加载进无修改的上游 Triton(见 §3)。
 
 ---
 
@@ -96,7 +98,50 @@ TLX 模板携带的专属 config 选项是动态 string key,不在 `TritonMeta` 
 
 ---
 
-## 3. 其他 Triton 官方扩展接口的使用
+## 3. 官方路标:是否有明确的支持计划
+
+结论:**有,且多层级公开可查**。证据链如下(信息截至 2026-09-30):
+
+### 3.1 发布跟踪机制(release feature request)
+
+pytorch/pytorch issue [#178917](https://github.com/pytorch/pytorch/issues/178917) "[Triton][Triton-Ext] Include TLX Triton Extension":
+
+- 由 Meta 的 Corbin Robeck(CRobeck)于 2026-03-31 创建,标签 `release-feature-request`("Feature Tracked for PyTorch OSS Releases")、`feature`、`triaged`、`upstream triton`;
+- 计划:以 `TRITON_EXT_ENABLED=1` 构建 Triton,把 `triton-lang/triton-ext` 作为独立包随 PyTorch Triton 发行,重点是其中的 `extensions/utlx`(TLX),交付形态为 fully out-of-tree;
+- 状态:**CLOSED / COMPLETED(2026-05-26)**,即已按计划落地。
+
+### 3.2 机制发布与前瞻承诺(官方博客)
+
+官方博客 [Triton Plugin Extensions: Enabling TLX and Custom Compiler Passes Out of the Box](https://pytorch.org/blog/triton-plugin-extensions-enabling-tlx-and-custom-compiler-passes-out-of-the-box/)(2026 年中):
+
+- PyTorch-Triton **3.7** 引入 Triton Plugin Extensions 系统:经 `TRITON_PLUGIN_PATHS` 运行时动态加载 .so 插件,无需 fork / 重编译;可插入、禁用、替换 MLIR 管线各阶段(TTIR -> TTGIR -> LLVM -> PTX/AMDGCN)的 pass;覆盖 NVIDIA 与 AMD 双后端;支持三级扩展(单 pass / 自定义 dialect / 顶层 DSL op);
+- TLX 以独立 PyPI 包 [triton-utlx](https://pypi.org/project/triton-utlx/) 发布,可加载进无修改的上游 Triton;
+- 明确承诺:"Starting with PyTorch-Triton 3.7, TLX will be enabled by default on all Triton releases going forward";
+- 一致性验证:插件路径与 fbtriton fork 生成逐字节相同的 PTX(H100)/ AMDGCN(MI350);性能与 cuBLAS 持平、超 rocBLAS 约 12-15%;
+- "What's Next" 路标:动态加载的自定义 backend(Intel / CPU 等)、triton-distributed、Proton / ConSan 性能分析插件化、目标特定优化 pass、2:4 稀疏等专用 op。
+
+### 3.3 上游承载仓库
+
+[triton-lang/triton-ext](https://github.com/triton-lang/triton-ext)(triton-lang 官方组织,2025-12 创建,持续活跃):定位 "A collection of out-of-tree extensions",按 backend / dialect / pass / extensions(含 `utlx`)/ support 组织,以独立 wheel 分发;2026-01 与 2026-07 的 Triton Community Meetup 均有 slides。注意 README 自述 "under construction ... foundations may change rapidly":框架可用,但 API 尚未承诺稳定。
+
+### 3.4 PyTorch 主仓内的持续投入
+
+torchTLX 系列 PR 自 2026-03 起持续合入(见 §2.5),近期(2026-09)仍有功能落地,如 ROCm gfx950 的 addmm + LayerNorm/RMSNorm TLX 融合(PR #197332);AMD 成员深度参与(如 #195022 解决 Triton 模块由哪个发行版提供的问题)。
+
+### 3.5 官方内容背书
+
+- [Fast 2-Simplicial Attention: Hardware-Efficient Kernels in TLX](https://pytorch.org/blog/fast-2-simplicial-attention-hardware-efficient-kernels-in-tlx/)(TLX kernel 在 Blackwell 上达 588 TFLOPS);
+- [Co-Designing Kernels for RecSys Inference](https://pytorch.org/blog/in-kernel-broadcast-optimization-co-designing-kernels-for-recsys-inference/)(RecSys 生产级 kernel 使用 TLX)。
+
+### 3.6 保留意见
+
+- 官方战略刻意是 **"out-of-tree 插件 + 发行版默认启用"**,而非把 TLX 合入 upstream triton 核心;没有给出"进核心"的时间表;
+- 双轨现状:Meta 生产环境走 fbtriton fork(JustKnob 控制),社区/上游走 utlx 插件;
+- Inductor 侧 `tlx_mode` 默认值仍取决于所装 Triton 是否提供 `triton._torchtlx_default.DEFAULT_MODE`,并非无条件全量打开。
+
+---
+
+## 4. 其他 Triton 官方扩展接口的使用
 
 | 接口 | 用途 | 关键位置 |
 |---|---|---|
@@ -112,7 +157,7 @@ TLX 模板携带的专属 config 选项是动态 string key,不在 `TritonMeta` 
 
 ---
 
-## 4. Inductor 自身暴露的对称插件口子
+## 5. Inductor 自身暴露的对称插件口子
 
 Inductor 不只是 Triton 扩展的消费者,自身也提供对称的扩展点,TLX 正是用这些机制挂进来的:
 
@@ -122,7 +167,7 @@ Inductor 不只是 Triton 扩展的消费者,自身也提供对称的扩展点,T
 
 ---
 
-## 5. 边界与设计意图
+## 6. 边界与设计意图
 
 - **常规 codegen 不用 TLX 低层原语**:从 IR 自动生成的通用 kernel 是保守的标准 `tl.*` 代码,目标是跨硬件可移植;mbarrier 手动管理、手写 warp specialization 等专家原语不进入这条路径。
 - **两条高性能旁路**:
@@ -133,7 +178,7 @@ Inductor 不只是 Triton 扩展的消费者,自身也提供对称的扩展点,T
 
 ---
 
-## 6. 关键代码索引速查表
+## 7. 关键代码索引速查表
 
 | 功能 | 文件:行 |
 |---|---|
@@ -154,7 +199,7 @@ Inductor 不只是 Triton 扩展的消费者,自身也提供对称的扩展点,T
 
 ---
 
-## 7. 复现方法
+## 8. 复现方法
 
 ```bash
 # TLX 集成全貌
