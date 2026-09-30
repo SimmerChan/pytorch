@@ -28,6 +28,7 @@ from torch._prims_common import (
     FloatLike,
     FloatWithoutSymFloat,
     IntLike,
+    IntWithoutSymInt,
     is_contiguous_for_memory_format_or_false,
     is_contiguous_or_false,
     is_weakly_lesser_type,
@@ -693,7 +694,7 @@ def is_complex(input: TensorLikeType):
 
 
 @register_decomposition(aten.conj_physical)
-@out_wrapper()
+@out_wrapper(exact_dtype=True)
 def conj_physical(input: TensorLikeType):
     if not utils.is_complex_dtype(input.dtype):
         return input
@@ -942,7 +943,7 @@ def logsumexp(
 
 
 @register_decomposition(aten.nan_to_num)
-@out_wrapper()
+@out_wrapper(exact_dtype=True)
 def nan_to_num(
     a: TensorLikeType,
     nan: NumberType | None = 0.0,
@@ -954,6 +955,11 @@ def nan_to_num(
 
     if utils.is_boolean_dtype(a.dtype) or utils.is_integer_dtype(a.dtype):
         return a.clone()
+
+    if utils.is_complex_dtype(a.dtype):
+        real = nan_to_num(torch.real(a), nan, posinf, neginf)
+        imag = nan_to_num(torch.imag(a), nan, posinf, neginf)
+        return torch.complex(real, imag)
 
     if nan is None:
         nan = 0.0
@@ -1538,7 +1544,7 @@ def fmod(a: TensorLikeType, b: TensorLikeType) -> TensorLikeType:
 
 
 @register_decomposition(aten.frexp)
-@out_wrapper("mantissa", "exponent")
+@out_wrapper("mantissa", "exponent", exact_dtype=True)
 def frexp(self: TensorLikeType) -> tuple[TensorLikeType, TensorLikeType]:
     return torch.return_types.frexp(prims.frexp(self))
 
@@ -2034,6 +2040,29 @@ def clamp(
     if min is None and max is None:
         msg = "clamp called but both min and max are none!"
         raise ValueError(msg)
+
+    if utils.is_integer_dtype(a.dtype):
+        # A lower bound below the dtype's range (or an upper bound above it) is a
+        # no-op and is dropped. The opposite case would force every element to an
+        # unrepresentable value, so it is rejected.
+        limits = torch.iinfo(a.dtype)
+        if isinstance(min, IntWithoutSymInt):
+            if min > limits.max:
+                raise RuntimeError(
+                    f"Clamp min value {min} is outside the representable range of {a.dtype}"
+                )
+            if min < limits.min:
+                min = None
+        if isinstance(max, IntWithoutSymInt):
+            if max < limits.min:
+                raise RuntimeError(
+                    f"Clamp max value {max} is outside the representable range of {a.dtype}"
+                )
+            if max > limits.max:
+                max = None
+        if min is None and max is None:
+            # Both bounds were dropped as no-ops; return a fresh tensor.
+            return torch.clone(a)
 
     if min is not None:
         a_isnan = torch.isnan(a)
@@ -2539,6 +2568,13 @@ def amin(
     *,
     out: Tensor | None = None,
 ) -> TensorLikeType:
+    if out is not None:
+        torch._check(
+            a.dtype == out.dtype,
+            lambda: f"Expected the dtype for input and out to match, but got "
+            f"{a.dtype} for input's dtype and {out.dtype} for out's dtype.",
+        )
+
     # reduces over all dimensions if dim=() is passed
     if dim == () or dim == []:
         dim = None
@@ -2563,6 +2599,13 @@ def amax(
     *,
     out: Tensor | None = None,
 ) -> TensorLikeType:
+    if out is not None:
+        torch._check(
+            a.dtype == out.dtype,
+            lambda: f"Expected the dtype for input and out to match, but got "
+            f"{a.dtype} for input's dtype and {out.dtype} for out's dtype.",
+        )
+
     # reduces over all dimensions if dim=() is passed
     if dim == () or dim == []:
         dim = None
@@ -4429,7 +4472,7 @@ def unbind(t: TensorLikeType, dim: int = 0) -> TensorSequenceType:
         )
 
 
-@out_wrapper()
+@out_wrapper(exact_dtype=True)
 def index_copy(x: TensorLike, dim: int, index: TensorLike, tensor: TensorLike):
     return x.clone(memory_format=torch.contiguous_format).index_copy_(
         dim, index, tensor
@@ -4514,7 +4557,7 @@ def _index_fill(
         return out
 
 
-@out_wrapper()
+@out_wrapper(exact_dtype=True)
 def index_add(
     x: TensorLike,
     dim: int,
@@ -4533,7 +4576,7 @@ def index_add(
 
 
 @register_decomposition(aten.index_select)
-@out_wrapper()
+@out_wrapper(exact_dtype=True)
 def index_select(x: TensorLike, dim: int, index: TensorLike):
     dim = utils.canonicalize_dims(x.ndim, dim)
     torch._check(
@@ -5773,7 +5816,7 @@ def logspace(
         dtype = default_complex_dtype
         _dtype = None  # torch.linspace will update the correct dtype
     else:
-        _dtype = torch.float64
+        _dtype = highest_precision_float(device)
 
     if isinstance(base, complex):
         raise AssertionError(f"base must not be complex, got {type(base)}")  # for mypy
@@ -6212,7 +6255,14 @@ def masked_fill(a: TensorLikeType, mask: TensorLikeType, value: TensorOrNumberLi
         # `masked_fill` allows cpu scalar to be moved to cuda, xpu and hpu but not otherwise.
         is_cpu_scalar = (
             a.device.type
-            in ["cuda", "xpu", "mps", torch._C._get_privateuse1_backend_name(), "hpu"]
+            in [
+                "cuda",
+                "xpu",
+                "mps",
+                torch._C._get_privateuse1_backend_name(),
+                "hpu",
+                "mtia",
+            ]
             and value.device.type == "cpu"
         )
         torch._check(
@@ -6341,7 +6391,7 @@ rpow = _make_r_binary_op(pow)
 
 
 @register_decomposition(aten.triu)
-@out_wrapper()
+@out_wrapper(exact_dtype=True)
 def triu(a: TensorLikeType, diagonal: int = 0) -> TensorLikeType:
     torch._check(
         a.ndim >= 2, lambda: "triu: input tensor must have at least 2 dimensions"
@@ -6358,7 +6408,7 @@ def triu(a: TensorLikeType, diagonal: int = 0) -> TensorLikeType:
 
 
 @register_decomposition(aten.tril)
-@out_wrapper()
+@out_wrapper(exact_dtype=True)
 def tril(a: TensorLikeType, diagonal: int = 0) -> TensorLikeType:
     torch._check(
         a.ndim >= 2, lambda: "tril: input tensor must have at least 2 dimensions"
