@@ -202,12 +202,35 @@ v2.10.0 的 autotune GEMM 后端集合为 `ATen, Triton, CUTLASS, CK, CKTILE, CP
 | 静态用例(上游 AST 5,388 / PTA grep) | 5,388 | 159 | **约 2.9%~3.0%** |
 | 对上游用例的 fork 数 | — | **1**(`test_codecache.py` 大幅裁剪,189 行 vs 上游 5,425 行)+1 个适配型 autotune 测试 | — |
 
-- PTA `test/_inductor/` 为**纯自建体系**(24/26 纯自建),覆盖域:融合(约 90,含 overlap scheduling/DVM MLIR fusion)、动态形状(35)、lowering/codegen(约 30)、autotune(11)、缓存(3)、flex(5);**无 AOTI 专项、无 cpp_wrapper 专项、cudagraph 等价物在 test/npu/(aclgraph 95 用例 + graph_tree 90 用例)** [S3]。
+- PTA `test/_inductor/` 为**纯自建体系**(24/26 纯自建),精确域分布见下方 13 域对照表(融合与调度 32/动态形状 35/Triton codegen 32/运行时 31/autotune 11/P0 小算子 10/flex 5/缓存 3,overlap scheduling 归运行时域);**无 AOTI 专项、无 cpp_wrapper 专项、cudagraph 等价物在 test/npu/(aclgraph 95 用例 + graph_tree 90 用例)** [S3]。
 - **注意口径**:torch_npu master(2026-08,对应 2.10 代)自建为 126 文件/547 用例 [D1];v2.13.0-26.2.0 分支实测 26 文件/159 用例 [S3]——版本切换中测试体系重构(部分等价看护移至 test/npu/ 的 aclgraph/graph_tree),两口径不可直接衔接,但均远小于上游分母。
 - 域级投入密度(547 分子口径,v2.13.0 分母):全量 10.2%;**P0 算子正确性基线 5.8%(67/1,148)仍是最短板**;FlexAttention 1.5%、Autograd 训练 1.0%、缓存 0.8%、调试工具链 1.9%、分布式 0% [D3]。
 - **CI 注入机制已存在但规模极小**:GitCode 流水线把上游 `pytorch/test` 打包为 artifact,以 `PYTORCH_TESTING_DEVICE_ONLY_FOR=privateuse1` 在 NPU 上收集执行;但白名单仅 126 个上游测试文件(其中 **inductor 仅 2 个**:`test_minifier_utils.py`、`test_op_completeness.py`),另有 4,068 条 skip 条目——**"上游测试树 + device 注入"机制已通,inductor 域尚未真正接入** [S3]。
 - 外围层对比:test/dynamo fork 上游 74% 文件但用例保留率仅 25%(1,681/6,609);opinfo 核心套件曾 fork 适配 8,239 项(2.10 时代口径)——**外围强、后端弱,inductor 是断层** [S3][D1]。
 - 分母膨胀压力:上游 inductor 测试每版本 +35%,v2.13 锁定基线 4,883 应适配方法,v2.10.x 锁定基线 3,522——**接入越晚,一次性面对的基线越大** [D3]。
+
+**13 域 × 昇腾支持度完整对照**(上游分母 = v2.13.0 发布版 13 域分布 [D2];NPU 自建与密度 = 547 分子口径 [D3];PTA 实体资产 = v2.13.0-26.2.0 分支 `test/_inductor` 逐文件 `grep -c "def test_"` 映射到 13 域,合计 26 文件/159 用例闭合 [S3]):
+
+| # | 特性域(优先级) | 上游方法(占比) | NPU 自建(547 口径) | 密度 | PTA 实体资产(v2.13.0 分支) | 昇腾支持情况 |
+|---|---|---:|---:|---:|---|---|
+| 1 | 算子级正确性基线(P0) | 1,148(21.3%) | 67 | 5.8% | 5 文件/10 用例(abs/add/cat/sum/batch_norm 各 1~4) | **部分支持**:847 条 ACLNN fallback 兜底数值面;自建密度为全域最低档,opinfo 可过上界 62~66% |
+| 2 | 动态形状(P1) | 109(2.0%) | 86 | **78.9%** | 2 文件/35 用例(dynamic_shape_fx_passes 32 + triton dynamic 3) | **强**:全域密度最高;32 用例专测 NPU FX pass;mark_dynamic/unbacked 语义随上游版本走 |
+| 3 | 融合与调度(P1) | 419(7.8%) | 124 | 29.6% | 4 文件/32 用例(dvm mlir_fusion 26 + graph_fusion 4 + kernel/elu 各 1) | **中**:31 个 NPU FX pass + dvm 融合有自建看护;但 prologue/epilogue 模板融合依赖 Triton 模板通道,NPU 不可用 |
+| 4 | Autotune 与 GEMM 模板(P2) | 375(7.0%) | 22 | 5.9% | 2 文件/11 用例(autotune_process 5 + costmodel 6) | **弱**:CATLASS 单通道,无多 DSL 同形状竞标(上游 6 通道);自建仅覆盖 autotune 进程框架 |
+| 5 | CUDAGraphs 与运行时(P2) | 299(5.5%) | 47 | 15.7% | 2 文件/31 用例(overlap 30 + npu_synchronize 1);**域外** test/npu: aclgraph 95 + graph_tree 90 | **中**:aclgraph 等价实现有实体看护;上游新语义(cudagraph trees 去耦/user streams)未对齐 |
+| 6 | Autograd 与训练(P2) | 310(5.8%) | 3 | 1.0% | 0 | **几乎空白**:编译期 autograd 语义验证缺失,训练场景 compile 无看护 |
+| 7 | FlexAttention 家族(P3) | 332(6.2%) | 5 | 1.5% | 2 文件/5 用例(metadata 3 + dvm_flex 2) | **几乎空白**:仅 1 个动态 mask metadata 测试;main 分母已到 645 |
+| 8 | AOTI 与 C++ 封装(P3) | 381(7.1%) | 56 | 14.7% | 0 | **中偏弱**:基础 AOTI 流程可用但无专项看护;Regional AOTI(torchrec DLRM 首场景)未跟踪 |
+| 9 | 缓存与并行编译(P3) | 362(6.7%) | 3 | 0.8% | 1 文件/3 用例(test_codecache 裁剪 fork,189 行 vs 上游 5,425 行) | **弱**:Fx graph cache/子进程池编译均无 NPU 侧验证 |
+| 10 | 调试与工具链(P3) | 876(16.3%) | 17 | 1.9% | 0 | **弱**:tlparse/结构化 trace/minifier 域基本未动 |
+| 11 | Triton 代码生成(专项) | 227(4.2%) | 82 | **36.1%** | 9 文件/32 用例(template_index_dtype 5 + triton_experimental 8 文件 27) | **强(自建口径)**:triton_experimental 专测 NPU triton codegen 回归(index 溢出/range tree/spatial fallback) |
+| 12 | 分布式(专项) | 45(0.8%) | 0 | 0% | 0 | **空白**:compile_on_one_rank/CooR 等上游新特性未跟踪 |
+| 13 | 厂商/后端专属(不做) | 505(9.4%) | 35 | — | 0 | **不做集**:NV/CUDA 专属(universal GEMM/cutlass fallback/origami 等),NPU 无对应面 |
+| — | **合计** | **5,388(100%)** | **547** | 10.2% | **26 文件/159 用例** | 应适配合计 512/4,883 = **10.5%** |
+
+表注:
+- 两个 NPU 分子口径不可直接衔接:547 为 torch_npu master(2026-08,2.10 代)自建树按统一域映射计数 [D3];159 为 v2.13.0-26.2.0 分支 test/_inductor 实体计数 [S3]。前者用于**密度配比**(分母同为 v2.13.0),后者用于**实体资产分布**;第 5 域的 aclgraph/graph_tree 185 用例在 test/npu/ 不计入 159。
+- 密度回答"配比",不等于功能覆盖率;定性列综合自 §2.1/§2.2 的功能盘点与 fallback/patch 机制。
 
 ### 2.4 特性级 Gap 对照表(社区 2.11~2.14 主线特性 vs PTA 现状)
 
