@@ -1,0 +1,1038 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TorchInductor 交互式教学:流程 / 融合范围 / 融合规则 / Autotune</title>
+<style>
+  :root{
+    --accent:#ee4c2c; --accent2:#f96854; --ink:#1d2330; --sub:#5a6472;
+    --line:#e3e7ee; --bg:#f7f8fa; --card:#ffffff;
+    --pw:#4f8ef7; --red:#9b59d0; --tpl:#ee4c2c; --ext:#8a929e; --view:#9aa2ad;
+    --ok:#0f9d58; --warn:#e8a200; --no:#d93025;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"PingFang SC","Microsoft YaHei",system-ui,-apple-system,sans-serif;color:var(--ink);background:var(--bg);line-height:1.65}
+  code,.mono{font-family:"SF Mono",Menlo,Consolas,monospace;font-size:.92em;background:#eef1f5;border-radius:4px;padding:1px 5px}
+  a{color:var(--accent)}
+  .wrap{max-width:1100px;margin:0 auto;padding:0 20px}
+
+  /* nav */
+  nav{position:sticky;top:0;z-index:50;background:#ffffffee;backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+  nav .wrap{display:flex;gap:4px;align-items:center;overflow-x:auto;padding:8px 20px}
+  nav a{white-space:nowrap;text-decoration:none;color:var(--sub);font-size:13.5px;padding:6px 12px;border-radius:18px}
+  nav a:hover{background:#f1f3f6;color:var(--ink)}
+  nav a.on{background:var(--accent);color:#fff}
+  .brand{font-weight:700;color:var(--ink);margin-right:10px;white-space:nowrap}
+
+  /* hero */
+  header{background:linear-gradient(135deg,#2b1408,#4a2010 55%,#7a3016);color:#fff;padding:56px 0 46px}
+  header h1{margin:0 0 10px;font-size:34px;letter-spacing:.5px}
+  header p{color:#ffd9cd;margin:4px 0;max-width:820px}
+  .stats{display:flex;gap:14px;flex-wrap:wrap;margin-top:26px}
+  .stat{background:#ffffff14;border:1px solid #ffffff2c;border-radius:12px;padding:12px 18px;min-width:150px}
+  .stat b{display:block;font-size:24px;color:#ffb49e}
+  .stat span{font-size:12.5px;color:#ffd9cd}
+
+  section{padding:46px 0 10px}
+  h2{font-size:25px;margin:0 0 6px;border-left:5px solid var(--accent);padding-left:12px}
+  h2 small{color:var(--sub);font-weight:400;font-size:14px;margin-left:10px}
+  h3{font-size:18px;margin:26px 0 8px}
+  .lead{color:var(--sub);margin:2px 0 18px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px 20px;margin:14px 0}
+  .hint{font-size:13px;color:var(--sub)}
+  .pill{display:inline-block;border-radius:14px;padding:2px 10px;font-size:12px;font-weight:600}
+  .pill.ok{background:#e2f5ea;color:var(--ok)} .pill.warn{background:#fbf0d7;color:#9a6b00} .pill.no{background:#fbe3e0;color:var(--no)}
+  .tag{display:inline-block;font-size:11px;border-radius:4px;padding:1px 7px;color:#fff;font-weight:600;vertical-align:2px}
+  .t-pw{background:var(--pw)} .t-red{background:var(--red)} .t-tpl{background:var(--tpl)} .t-ext{background:var(--ext)} .t-view{background:var(--view)}
+  .btn{border:none;cursor:pointer;background:var(--accent);color:#fff;font-size:14px;padding:8px 18px;border-radius:8px;font-weight:600}
+  .btn:hover{background:var(--accent2)} .btn.ghost{background:#fff;color:var(--accent);border:1.5px solid var(--accent)}
+  .btn.seg{background:#fff;color:var(--sub);border:1.5px solid var(--line);border-radius:8px;margin-right:8px}
+  .btn.seg.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+  .callout{border-radius:12px;padding:14px 18px;margin:14px 0;font-size:14px}
+  .callout.gold{background:#fff8e6;border:1px solid #f0dfa8}
+  .callout.blue{background:#eef4ff;border:1px solid #cfdefc}
+  .callout .t{font-weight:700;margin-bottom:4px}
+  table{border-collapse:collapse;width:100%;font-size:13.5px;background:#fff}
+  th,td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}
+  th{background:#f2f4f7;white-space:nowrap}
+  .src{font-size:12px;color:var(--sub)}
+  .src code{background:#f2f4f7}
+
+  /* stepper */
+  .steps{display:flex;flex-wrap:wrap;gap:0;align-items:stretch;margin:10px 0}
+  .step{flex:1;min-width:120px;border:1.5px solid var(--line);background:#fff;border-radius:10px;padding:10px 12px;cursor:pointer;position:relative;margin-right:26px;transition:all .2s}
+  .step:last-child{margin-right:0}
+  .step:after{content:"▶";position:absolute;right:-22px;top:50%;transform:translateY(-50%);color:#c3c9d3;font-size:11px}
+  .step:last-child:after{content:""}
+  .step .n{font-size:11px;color:var(--accent);font-weight:700}
+  .step .t{font-weight:700;font-size:14px;margin:2px 0}
+  .step .s{font-size:11.5px;color:var(--sub)}
+  .step.on{border-color:var(--accent);box-shadow:0 4px 14px #ee4c2c22;background:#fff8f6}
+  #stageCard{margin-top:14px}
+  #stageCard h4{margin:2px 0 8px;font-size:16px}
+  .kv{display:flex;gap:10px;flex-wrap:wrap;margin:8px 0}
+  .kv div{background:#f2f4f7;border-radius:8px;padding:6px 12px;font-size:13px}
+  .kv b{color:var(--accent)}
+  ul.pts{margin:8px 0;padding-left:20px;font-size:13.5px}
+  ul.pts li{margin:3px 0}
+
+  /* calculator */
+  .calc{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  @media(max-width:760px){.calc{grid-template-columns:1fr}}
+  .calc label{font-size:13px;color:var(--sub)}
+  .calc input[type=range]{width:100%}
+  .bars{margin:10px 0}
+  .bar{height:26px;border-radius:6px;margin:6px 0;color:#fff;font-size:12.5px;display:flex;align-items:center;padding:0 10px;transition:width .5s;min-width:2px;white-space:nowrap;overflow:hidden}
+  .bar.uf{background:#9aa2ad} .bar.fu{background:var(--accent)}
+  .num{font-size:22px;font-weight:700;color:var(--accent)}
+
+  /* op cards */
+  .opgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px;margin:12px 0}
+  .op{border:1.5px solid var(--line);background:#fff;border-radius:10px;padding:10px 12px;cursor:pointer;transition:all .15s}
+  .op:hover{border-color:#c9cfda}
+  .op.on{border-color:var(--accent);background:#fff8f6}
+  .op b{font-size:14px} .op .ex{font-size:12px;color:var(--sub)}
+  #opDetail{min-height:90px}
+
+  /* scenarios */
+  .scgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px}
+  .sc{border:1px solid var(--line);border-radius:12px;background:#fff;padding:12px}
+  .sc svg{width:100%;height:auto;display:block}
+  .sc .r{margin-top:10px;font-size:13px;min-height:24px}
+  .verdict{margin-top:8px;border-radius:8px;padding:8px 12px;font-size:13px;display:none}
+  .verdict.v-ok{background:#e2f5ea;display:block} .verdict.v-no{background:#fbe3e0;display:block} .verdict.v-warn{background:#fbf0d7;display:block}
+  .verdict .why{font-family:Menlo,Consolas,monospace;font-size:11.5px;color:var(--sub);display:block;margin-top:2px}
+
+  /* fusion viz */
+  .fviz{display:flex;gap:24px;flex-wrap:wrap}
+  .fviz .l{flex:1;min-width:320px}
+  .stepbtns{margin:8px 0}
+  .gnode{transition:all .4s}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12.5px;color:var(--sub);margin:8px 0}
+  .legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+
+  /* autotune */
+  .cand{display:flex;align-items:center;gap:10px;margin:7px 0}
+  .cand .nm{width:250px;font-size:13px;flex-shrink:0}
+  .cand .bw{flex:1;height:24px;background:#f1f3f6;border-radius:6px;overflow:hidden}
+  .cand .bf{height:100%;width:0;border-radius:6px;transition:width .8s ease;display:flex;align-items:center;justify-content:flex-end;padding-right:8px;color:#fff;font-size:12px;white-space:nowrap}
+  .cand.win .bf{outline:2.5px solid var(--ok)}
+  .cand.win .nm:after{content:" ← 最快";color:var(--ok);font-weight:700}
+  .ms0 .bf{background:#c7ccd4} .ms1 .bf{background:var(--pw)} .ms2 .bf{background:#6a7bd8} .ms3 .bf{background:var(--red)} .ms4 .bf{background:var(--tpl)} .ms5 .bf{background:#0f9d58}
+
+  /* topology */
+  .topoWrap{background:#fff;border:1px solid var(--line);border-radius:14px;padding:14px}
+  #topoSvg{width:100%;height:auto;display:block}
+  .node{rx:8;cursor:pointer}
+  .node rect{transition:fill .3s,stroke .3s}
+  .kchip{font-size:10px;font-weight:700}
+  #kernelList{display:grid;grid-template-columns:1fr 1fr;gap:6px 18px;margin-top:12px}
+  @media(max-width:760px){#kernelList{grid-template-columns:1fr}}
+  .krow{font-size:12.5px;border-left:3px solid #ccc;padding:3px 8px;background:#fafbfc;border-radius:0 6px 6px 0}
+  .krow b{font-size:12px}
+  #topoNote{margin-top:12px;min-height:44px;font-size:13.5px;background:#f2f4f7;border-radius:8px;padding:10px 14px}
+  .cnt{font-size:15px;margin-top:10px}
+  .cnt b{color:var(--accent);font-size:20px}
+
+  /* lowering section */
+  .lowgrid{display:grid;grid-template-columns:1fr 1.25fr 1.15fr;gap:12px;margin:14px 0}
+  @media(max-width:860px){.lowgrid{grid-template-columns:1fr}}
+  .lowbox{border:1.5px solid var(--line);border-radius:10px;background:#fbfcfe;padding:12px 14px;min-width:0}
+  .lowbox h5{margin:0 0 8px;font-size:12.5px;color:var(--sub);font-weight:700;letter-spacing:.3px}
+  pre.code{font-family:"SF Mono",Menlo,Consolas,monospace;font-size:12px;line-height:1.55;background:#1f2430;color:#e8ecf5;border-radius:8px;padding:10px 12px;margin:6px 0;overflow-x:auto}
+  .lowbox pre.code{white-space:pre-wrap;word-break:break-word}
+  pre.code .cm{color:#7f8aa0}
+  .irrow{font-family:"SF Mono",Menlo,Consolas,monospace;font-size:12px;padding:4px 10px;border-left:3px solid #d5dae2;margin:3px 0;background:#fafbfc;border-radius:0 6px 6px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .irrow.on{border-left-color:var(--accent);background:#fff8f6;font-weight:600}
+  .irrow .fn{color:var(--sub)}
+
+  footer{padding:30px 0 50px;color:var(--sub);font-size:13px}
+  hr{border:none;border-top:1px solid var(--line);margin:26px 0}
+</style>
+</head>
+<body>
+
+<nav id="nav">
+  <div class="wrap">
+    <span class="brand">⚡ TorchInductor 教学</span>
+    <a href="#s1">整体流程</a>
+    <a href="#sLower">Lowering</a>
+    <a href="#s2">融合的本质</a>
+    <a href="#s3">融合范围</a>
+    <a href="#s4">融合规则</a>
+    <a href="#s5">Autotune</a>
+    <a href="#s6">真实拓扑</a>
+    <a href="#s7">配置速查</a>
+  </div>
+</nav>
+
+<header>
+  <div class="wrap">
+    <h1>TorchInductor 交互式教学</h1>
+    <p>torch.compile 的默认编译后端:把 Dynamo 捕获的 ATen 级计算图,经「lowering → 依赖分析 → 融合 → 代码生成 → autotune」编译成少量 Triton / C++ kernel。</p>
+    <p>本页基于本仓库 main 分支源码整理,所有判定逻辑与默认值均可点击溯源到源码文件。</p>
+    <div class="stats">
+      <div class="stat"><b>ATen 级</b><span>lowering 契约(非 prim 级)</span></div>
+      <div class="stat"><b>155+</b><span>register_lowering 注册</span></div>
+      <div class="stat"><b>64</b><span>max_fusion_size(调度图 node 数)</span></div>
+      <div class="stat"><b>23 → ~13</b><span>下文 Transformer 拓扑的融合效果</span></div>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+<!-- ============ 1 整体流程 ============ -->
+<section id="s1">
+  <h2>1. 整体流程<small>点击每个阶段查看细节</small></h2>
+  <p class="lead">torch.compile 的完整链路中,Inductor 负责后半程:输入是一张 <b>ATen 级、已 functionalize 的 FX graph</b>,输出是一个可直接调用的 Python/C++ wrapper。</p>
+  <div class="card">
+    <div class="steps" id="steps"></div>
+    <div id="stageCard"></div>
+  </div>
+</section>
+
+<!-- ============ 2 Lowering ============ -->
+<section id="sLower">
+  <h2>2. Lowering:aten op 如何变成 IR<small>define-by-run:查表后 handler 立即执行,产出「buffer + inner_fn 闭包」</small></h2>
+  <p class="lead">调度器面对的不是算子链,而是 <b>buffer 生产/消费图</b>。这一节把阶段 5 放大:FX 图每走到一个 <code>call_function</code>,查 <code>lowerings</code> 注册表并<b>立即执行</b> handler(<a class="src" href="../../torch/_inductor/graph.py#L1465">graph.py:1465 call_function</a>),构造 IR 对象并登记为 <code>op{N}</code>(<a class="src" href="../../torch/_inductor/graph.py#L1173">graph.py:1173 register_operation</a>)。逐步执行下面 4 个 FX 节点,观察下方 IR 列表如何生长:</p>
+  <div class="card">
+    <div class="mono" style="font-size:13px">def f(x, y):  return (x.relu() * y + 1.0).sum(dim=1)</div>
+    <div class="hint" style="margin:6px 0 10px">展开成 4 个 FX call_function(relu / mul / add / sum),逐个走 lowering:</div>
+    <div class="steps" id="lSteps"></div>
+    <div class="lowgrid">
+      <div class="lowbox"><h5>① FX call_function 节点</h5><div id="lFx"></div></div>
+      <div class="lowbox"><h5>② lowerings 查表命中,handler 立即执行</h5><div id="lMid"></div></div>
+      <div class="lowbox"><h5>③ IR 产物,登记为 op{N}</h5><div id="lIrP"></div></div>
+    </div>
+    <div class="lowbox" style="margin-top:12px"><h5>V.graph.operations(累积)</h5><div id="lIR"></div></div>
+    <div class="stepbtns">
+      <button class="btn ghost" id="lPrev">◀ 上一步</button>
+      <button class="btn" id="lNext">下一步 ▶</button>
+      <span class="hint" id="lCnt"></span>
+    </div>
+  </div>
+
+  <h3>映射不是 1:1:四种「计数漂移」</h3>
+  <p class="hint">「1 个 aten op = 1 个 IR 条目」只在理想情形成立。点击卡片查看四种漂移(这决定了 max_fusion_size 数的到底是什么):</p>
+  <div class="opgrid" id="driftGrid"></div>
+  <div id="driftDetail" class="callout blue" style="display:none"></div>
+
+  <h3>闭环:IR 条目 → 调度 node → kernel(三个度量各在各处)</h3>
+  <div class="card fviz">
+    <div class="l" style="min-width:340px">
+      <svg viewBox="0 0 640 200">
+        <g font-size="11">
+          <rect x="10" y="18" width="128" height="30" rx="7" fill="#fff" stroke="#8a929e"/>
+          <text x="74" y="37" text-anchor="middle">FX:relu/mul/add/sum</text>
+          <line x1="138" y1="33" x2="164" y2="33" stroke="#8a929e" marker-end="url(#arr)"/>
+          <rect x="166" y="18" width="150" height="30" rx="7" fill="#fbe7e2" stroke="#ee4c2c"/>
+          <text x="241" y="37" text-anchor="middle">lowering(查表立即执行)</text>
+          <line x1="316" y1="33" x2="342" y2="33" stroke="#8a929e" marker-end="url(#arr)"/>
+          <rect x="344" y="8" width="150" height="50" rx="7" fill="#dfe9fd" stroke="#4f8ef7"/>
+          <text x="419" y="28" text-anchor="middle" fill="#2b5cb8" font-weight="bold">IR 条目 ×4</text>
+          <text x="419" y="44" text-anchor="middle" fill="#2b5cb8" font-size="10">ComputedBuffer(data=Loops)</text>
+          <text x="74" y="64" text-anchor="middle" font-size="10" fill="#5a6472">aten op 数 = 4</text>
+          <line x1="419" y1="58" x2="419" y2="84" stroke="#8a929e" marker-end="url(#arr)"/>
+          <text x="428" y="75" font-size="10" fill="#5a6472">create_scheduler_node 包装(1:1)</text>
+          <rect x="344" y="86" width="150" height="34" rx="7" fill="#e2f5ea" stroke="#0f9d58"/>
+          <text x="419" y="107" text-anchor="middle" fill="#0b6e3c" font-weight="bold">SchedulerNode ×4</text>
+          <line x1="494" y1="103" x2="520" y2="103" stroke="#8a929e" marker-end="url(#arr)"/>
+          <rect x="522" y="86" width="108" height="34" rx="7" fill="#e2f5ea" stroke="#0f9d58"/>
+          <text x="576" y="101" text-anchor="middle" fill="#0b6e3c" font-weight="bold">FusedNode</text>
+          <text x="576" y="114" text-anchor="middle" fill="#0b6e3c" font-size="10">get_nodes()=4 ≤ 64</text>
+          <line x1="419" y1="120" x2="419" y2="146" stroke="#8a929e" marker-end="url(#arr)"/>
+          <rect x="344" y="148" width="286" height="40" rx="7" fill="#f3e8fb" stroke="#9b59d0"/>
+          <text x="487" y="165" text-anchor="middle" fill="#6a2d90" font-weight="bold">codegen:inner_fn 逐层内联 → 1 个 kernel</text>
+          <text x="487" y="181" text-anchor="middle" fill="#6a2d90" font-size="10">kernel body 是复合表达式,四个 op 共享一次读写</text>
+          <line x1="241" y1="48" x2="241" y2="155" stroke="#c3c9d3" stroke-dasharray="4 3"/>
+          <path d="M 241 155 C 260 178 320 168 342 168" stroke="#c3c9d3" stroke-dasharray="4 3" fill="none"/>
+          <text x="60" y="140" font-size="11" fill="#5a6472">表达式藏在闭包里</text>
+          <text x="60" y="156" font-size="10" fill="#8a929e">调度器装箱时看不见它</text>
+        </g>
+      </svg>
+    </div>
+    <div class="l">
+      <table>
+        <tr><th>度量</th><th>数在哪里</th><th>本例</th></tr>
+        <tr><td>aten op 数</td><td>FX 图的 call_function 节点</td><td class="mono">4</td></tr>
+        <tr><td><b>IR 条目数</b>(max_fusion_size=64 的计数对象)</td><td><code>V.graph.operations</code></td><td class="mono">4</td></tr>
+        <tr><td>kernel 内表达式数</td><td>codegen 内联后的 kernel body</td><td>无硬上限,由 Triton 编译器 / SM 资源裁决</td></tr>
+      </table>
+      <ul class="pts" style="margin-top:10px">
+        <li>每个 ir.Operation 带 <code>origin_node</code> 指回 FX 节点(<a class="src" href="../../torch/_inductor/ir.py#L996">ir.py:996</a>),链条 SchedulerBuffer → ir.Operation → FX 节点全程可追溯。</li>
+        <li>融合之所以能跨「算子」进行:调度器看到的不是算子链,而是 buffer 生产/消费图(<code>read_writes</code>),闭包内联让算子边界在 codegen 溶解。</li>
+        <li>调度端入口:<code>create_scheduler_node</code> 对每个 ir.Operation 一对一包装(<a class="src" href="../../torch/_inductor/scheduler.py#L6398">scheduler.py:6398</a>)。</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 3 融合的本质 ============ -->
+<section id="s2">
+  <h2>3. 融合的本质<small>为什么融了就快:省带宽 + 省 launch</small></h2>
+  <p class="lead">融合 = 把多个算子的循环体拼进同一个 kernel,中间张量留在寄存器/共享内存里,<b>不再写回 HBM 再读回来</b>,同时少一次 kernel launch 与算子下发。拖动滑块感受两种收益的占比变化:</p>
+  <div class="card">
+    <div class="calc">
+      <div>
+        <label>张量元素个数 N(<span id="nLabel">1,000,000</span> 个,例:y = gelu(x) + bias,fp16)</label>
+        <input type="range" id="nRange" min="3" max="8.3" step="0.05" value="6">
+        <label style="display:block;margin-top:10px">GPU 显存带宽</label>
+        <select id="bwSel" class="mono" style="padding:5px;border-radius:6px;border:1px solid var(--line)">
+          <option value="2000">A100 — 2.0 TB/s</option>
+          <option value="3350">H800 — 3.35 TB/s</option>
+          <option value="900" selected>V100 — 0.9 TB/s</option>
+          <option value="1000">RTX 4090 — 1.0 TB/s</option>
+        </select>
+        <div style="margin-top:14px;font-size:13.5px" id="calcMsg"></div>
+      </div>
+      <div>
+        <div class="bars">
+          <div class="hint">不融合:读 x + 写 t + 读 t + 写 y = <b>8N 字节</b>,2 次 launch</div>
+          <div class="bar uf" id="barUF">不融合</div>
+          <div class="hint" style="margin-top:8px">融合:读 x + 写 y = <b>4N 字节</b>,1 次 launch</div>
+          <div class="bar fu" id="barFU">融合</div>
+        </div>
+        <div class="hint">估算耗时(device 侧,不含下发)</div>
+        <div>不融合 ≈ <span class="num" id="tUF">-</span> ms &nbsp;&nbsp; 融合 ≈ <span class="num" id="tFU">-</span> ms</div>
+        <div id="regime" style="margin-top:8px"></div>
+      </div>
+    </div>
+  </div>
+  <div class="callout gold"><div class="t">两个 regime 的启示</div>
+    大 kernel 时收益由<b>带宽</b>主导(中间张量省一次 HBM round-trip);小 kernel 时收益由 <b>launch / 算子下发</b>主导(每次少几微秒,但乘上千百个 kernel 非常可观)。Inductor 的 autotune 只保证第一类收益(见第 6 节),第二类收益靠「kernel 数单调减少」的结构性假设 + cpp_wrapper / CUDA Graph 保障。
+  </div>
+</section>
+
+<!-- ============ 3 融合范围 ============ -->
+<section id="s3">
+  <h2>4. 融合范围<small>哪些能融、哪些是屏障 —— 点击卡片查看原因</small></h2>
+  <p class="lead">判定的主干是 <code>Scheduler.can_fuse</code>(<a class="src" href="../../torch/_inductor/scheduler.py#L10409">scheduler.py:10409</a>):合法性检查(依赖匹配、无环、同设备)+ 类型规则(模板 epilogue/prologue 约束)+ 启发式(共享数据、max_fusion_size)。下表按<b>算子类别</b>汇总:</p>
+  <div class="card">
+    <div class="opgrid" id="opGrid"></div>
+    <div id="opDetail" class="callout blue" style="display:none"></div>
+  </div>
+
+  <h3>屏障实测:四个典型场景</h3>
+  <p class="hint">点击「尝试融合」,结果面板给出判定与源码中的真实拒绝原因(<code>why(...)</code> 字符串)。</p>
+  <div class="scgrid" id="scGrid"></div>
+</section>
+
+<!-- ============ 4 融合规则 ============ -->
+<section id="s4">
+  <h2>5. 融合规则<small>纵向融合 / 横向融合 / 模板 epilogue-prologue</small></h2>
+
+  <h3>5.1 纵向融合(Vertical):生产者 → 消费者</h3>
+  <p class="lead">沿数据流的相邻节点合并。<b>合法性</b>看依赖(<code>can_fuse_vertical</code>,<a class="src" href="../../torch/_inductor/scheduler.py#L10911">scheduler.py:10911</a>):消费者读的缓冲必须与生产者的写<b>逐点匹配</b>(MemoryDep 相同索引),不能隔着未融合的中间节点,不能成环。<b>收益</b>看共享数据量。点击按钮逐步融合:</p>
+  <div class="card">
+    <div class="fviz">
+      <div class="l">
+        <svg viewBox="0 0 340 210" id="vSvg">
+          <defs><marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#8a929e"/></marker></defs>
+          <rect class="gnode" id="vn0" x="20" y="20" width="120" height="42" rx="8" fill="#dfe9fd" stroke="#4f8ef7"/>
+          <text x="80" y="46" text-anchor="middle" font-size="13">t0 = x + b (pw)</text>
+          <rect class="gnode" id="vn1" x="20" y="84" width="120" height="42" rx="8" fill="#dfe9fd" stroke="#4f8ef7"/>
+          <text x="80" y="110" text-anchor="middle" font-size="13">t1 = gelu(t0) (pw)</text>
+          <rect class="gnode" id="vn2" x="20" y="148" width="120" height="42" rx="8" fill="#eadcfb" stroke="#9b59d0"/>
+          <text x="80" y="174" text-anchor="middle" font-size="13">y = sum(t1) (red)</text>
+          <line x1="140" y1="105" x2="180" y2="105" stroke="none"/>
+          <text id="vCount" x="230" y="60" font-size="14" font-weight="700" fill="#1d2330">3 个 kernel</text>
+          <text id="vIO" x="230" y="86" font-size="12" fill="#5a6472">访存: 3 load + 3 store</text>
+          <text id="vLog" x="230" y="130" font-size="11.5" fill="#5a6472">每个中间张量</text>
+          <text x="230" y="146" font-size="11.5" fill="#5a6472">都过一次 HBM</text>
+        </svg>
+        <div class="stepbtns">
+          <button class="btn seg on" id="vStep0">初始</button>
+          <button class="btn seg" id="vStep1">融 add+gelu</button>
+          <button class="btn seg" id="vStep2">再融入 reduction</button>
+        </div>
+        <div id="vText" class="hint" style="min-height:60px"></div>
+      </div>
+      <div class="l">
+        <h4 style="margin-top:0">每步发生了什么检查</h4>
+        <ul class="pts">
+          <li><b>依赖匹配:</b> sum 读 t1 的索引与 gelu 写 t1 完全一致(MemoryDep 逐点对应),否则 <code>"memory deps did not match"</code>。</li>
+          <li><b>无中间夹层:</b> 生产者与消费者之间不能隔未融合节点,否则 <code>"intermediate nodes between node1 &amp; node2"</code>。</li>
+          <li><b>无环:</b> <code>will_fusion_create_cycle</code> 检查;DAG 里下游融合不得打乱上游调度。</li>
+          <li><b>共享数据 &gt; 0:</b> pw 链之间靠「消费者读生产者写」天然满足;为 0 时默认拒绝。</li>
+          <li><b>收益排序:</b> <code>score_fusion</code> ≈ 省掉的共享字节 + 图序邻近度,贪心从高分对开始融。</li>
+        </ul>
+        <div class="callout blue" style="font-size:13px">pointwise 生产者可以<b>融入 reduction 消费者内部</b>(reduction 的 loop 里先算 pw 再归约);反向(reduction 的输出喂点链)也合法,但输出要在 kernel 内物化,persistent reduction 下 softmax 这类「red→pw→red→pw」整条链可缩成 1 个 kernel。</div>
+      </div>
+    </div>
+  </div>
+
+  <h3>5.2 横向融合(Horizontal):无依赖的平行支路</h3>
+  <div class="card fviz">
+    <div class="l">
+      <svg viewBox="0 0 340 170">
+        <rect x="20" y="60" width="70" height="34" rx="8" fill="#eef1f5" stroke="#9aa2ad"/>
+        <text x="55" y="82" text-anchor="middle" font-size="13">输入 x</text>
+        <line x1="90" y1="77" x2="120" y2="40" stroke="#8a929e" marker-end="url(#arr)"/>
+        <line x1="90" y1="77" x2="120" y2="114" stroke="#8a929e" marker-end="url(#arr)"/>
+        <rect class="hnode" id="hn0" x="122" y="22" width="110" height="36" rx="8" fill="#dfe9fd" stroke="#4f8ef7"/>
+        <text x="177" y="45" text-anchor="middle" font-size="12.5">a = f(x)</text>
+        <rect class="hnode" id="hn1" x="122" y="96" width="110" height="36" rx="8" fill="#dfe9fd" stroke="#4f8ef7"/>
+        <text x="177" y="119" text-anchor="middle" font-size="12.5">b = g(x)</text>
+        <text id="hTag" x="255" y="82" font-size="13" font-weight="700">2 个 kernel</text>
+        <text id="hNote" x="255" y="102" font-size="11.5" fill="#5a6472">x 读两次</text>
+      </svg>
+    </div>
+    <div class="l" style="min-width:300px">
+      <ul class="pts">
+        <li>两条支路<b>互不依赖但读同一输入</b> → 共享数据 = x 的字节数,≥ 阈值即可融(<code>can_fuse_horizontal</code>,<a class="src" href="../../torch/_inductor/choices.py#L758">choices.py:758</a>)。</li>
+        <li>阈值 <code>score_fusion_memory_threshold = 10</code> 字节:省的字节太少就不值得合并循环。</li>
+        <li><b>完全无共享数据</b>时默认拒绝(<code>"no shared data"</code>);<code>aggressive_fusion=True</code>(且非 reduction)才放开 —— 放开后逐对合并或生成 combo kernel / foreach。</li>
+        <li>相距太远的两支路拒融:<code>"Nodes are too far away"</code>(合并会让两条支路的中间结果同时存活,推高峰值显存)。</li>
+        <li>对<b>完全无关</b>的 kernel,还有更彻底的合并形态 —— combo kernel,见 <a href="#combo">4.3</a>。</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 id="combo">5.3 Combo Kernel:无关 kernel 的合并执行</h3>
+  <p class="lead">常规横向融合要求「有共享数据」;combo kernel(<code>combo_kernels</code>,默认关)是它的彻底形态:把<b>互不依赖、shape 也可以不同</b>的独立 kernel 在编译期拼进<b>同一个 Triton kernel</b>,只为摊一次 launch。</p>
+  <div class="card fviz">
+    <div class="l" style="min-width:360px">
+      <svg viewBox="0 0 470 210">
+        <rect x="14" y="14" width="160" height="42" rx="8" fill="#dfe9fd" stroke="#4f8ef7"/>
+        <text x="94" y="33" text-anchor="middle" font-size="12">a = x * 2</text>
+        <text x="94" y="48" text-anchor="middle" font-size="10" fill="#5a6472">独立 kernel · 4 个 program</text>
+        <g>
+          <rect x="30" y="64" width="13" height="13" rx="2" fill="#4f8ef7"/><rect x="46" y="64" width="13" height="13" rx="2" fill="#4f8ef7"/><rect x="62" y="64" width="13" height="13" rx="2" fill="#4f8ef7"/><rect x="78" y="64" width="13" height="13" rx="2" fill="#4f8ef7"/>
+        </g>
+        <rect x="14" y="104" width="160" height="42" rx="8" fill="#eadcfb" stroke="#9b59d0"/>
+        <text x="94" y="123" text-anchor="middle" font-size="12">b = y + 1(不同 shape)</text>
+        <text x="94" y="138" text-anchor="middle" font-size="10" fill="#5a6472">独立 kernel · 6 个 program</text>
+        <g>
+          <rect x="30" y="154" width="13" height="13" rx="2" fill="#9b59d0"/><rect x="46" y="154" width="13" height="13" rx="2" fill="#9b59d0"/><rect x="62" y="154" width="13" height="13" rx="2" fill="#9b59d0"/><rect x="78" y="154" width="13" height="13" rx="2" fill="#9b59d0"/><rect x="94" y="154" width="13" height="13" rx="2" fill="#9b59d0"/><rect x="110" y="154" width="13" height="13" rx="2" fill="#9b59d0"/>
+        </g>
+        <line x1="186" y1="105" x2="228" y2="105" stroke="#8a929e" stroke-width="1.6" marker-end="url(#arr)"/>
+        <text x="207" y="94" text-anchor="middle" font-size="10.5" fill="#5a6472">装箱</text>
+        <rect x="234" y="14" width="222" height="42" rx="8" fill="#e8f5ee" stroke="#0f9d58" stroke-width="1.8"/>
+        <text x="345" y="33" text-anchor="middle" font-size="12" font-weight="700">combo kernel · 10 个 program</text>
+        <text x="345" y="48" text-anchor="middle" font-size="10" fill="#5a6472">单次 launch · grid 拼接</text>
+        <g>
+          <rect x="250" y="64" width="13" height="13" rx="2" fill="#4f8ef7"/><rect x="266" y="64" width="13" height="13" rx="2" fill="#4f8ef7"/><rect x="282" y="64" width="13" height="13" rx="2" fill="#4f8ef7"/><rect x="298" y="64" width="13" height="13" rx="2" fill="#4f8ef7"/>
+          <rect x="322" y="64" width="13" height="13" rx="2" fill="#9b59d0"/><rect x="338" y="64" width="13" height="13" rx="2" fill="#9b59d0"/><rect x="354" y="64" width="13" height="13" rx="2" fill="#9b59d0"/><rect x="370" y="64" width="13" height="13" rx="2" fill="#9b59d0"/><rect x="386" y="64" width="13" height="13" rx="2" fill="#9b59d0"/><rect x="402" y="64" width="13" height="13" rx="2" fill="#9b59d0"/>
+        </g>
+        <text x="282" y="96" text-anchor="middle" font-size="10" fill="#4f8ef7" font-weight="700">pid 0-3 → a</text>
+        <text x="365" y="96" text-anchor="middle" font-size="10" fill="#9b59d0" font-weight="700">pid 4-9 → b</text>
+        <text x="345" y="130" text-anchor="middle" font-size="10.5" fill="#5a6472">子 kernel 互不可见,越界 program 置零;</text>
+        <text x="345" y="146" text-anchor="middle" font-size="10.5" fill="#5a6472">各子逻辑访存量不变,收益只来自 launch ↓</text>
+      </svg>
+    </div>
+    <div class="l">
+      <ul class="pts">
+        <li><b>代码生成:</b>统一 grid 后用 <code>Sequential / RoundRobin / Flatten</code> 三种映射策略把 program id 分发到各子 kernel(<a class="src" href="../../torch/_inductor/runtime/triton_heuristics.py#L5848">triton_heuristics.py:5848</a>),拼装逻辑在 <a class="src" href="../../torch/_inductor/codegen/triton_combo_kernel.py"><code>triton_combo_kernel.py</code></a>。</li>
+        <li><b>总开关 <code>combo_kernels=False</code>:</b>叠加在常规融合之上 —— 先让 4.1 / 4.2 的规则各自成 kernel,再把剩下的独立 kernel 装箱。</li>
+        <li><b>装箱过滤:</b>extern、模板、foreach、staged/multi-output、间接索引节点都被排除;默认最多 <b>8 个子 kernel</b>(<code>combo_kernel_max_num_nodes</code>)、<b>250 个 buffer 参数</b>(<code>combo_kernel_max_num_args</code>);<code>combo_kernels_pointwise_only</code> 可只收 pointwise。</li>
+        <li><b>是否划算可实测:</b><code>benchmark_combo_kernel=True</code> 时对「合并 vs 独立」逐组实测;<b>&lt; 0.3 ms 的小 kernel 跳过实测直接融</b> —— 代码注释原话:小 kernel 几乎必然有收益但难测准(<a class="src" href="../../torch/_inductor/scheduler.py#L12947">scheduler.py:12947</a>)。注意这又是 launch 侧收益,同样不在 device-time 计量里。</li>
+        <li><b>子 kernel 独立调优:</b><code>combo_kernel_per_subkernel_blocks</code> 让每个子 kernel 拥有自己的 XBLOCK_0 / YBLOCK_0 …,并支持编译期 per-subkernel autotune;另有峰值显存门控与调度距离门控(<code>combo_kernel_max_distance=64</code>)。</li>
+        <li><b>foreach 是它的特例:</b>同 shape 的 foreach 合并早已默认启用;combo kernel 是推广到「不同 shape、不同计算」的一般情形。</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>5.4 模板 epilogue / prologue:GEMM 与周围点算的融合</h3>
+  <div class="card fviz">
+    <div class="l" style="min-width:340px">
+      <svg viewBox="0 0 360 150">
+        <rect x="16" y="55" width="86" height="40" rx="8" fill="#fbe7e2" stroke="#ee4c2c"/>
+        <text x="59" y="80" text-anchor="middle" font-size="12.5">GEMM 模板</text>
+        <rect x="118" y="47" width="110" height="56" rx="8" fill="#fff" stroke="#ee4c2c" stroke-dasharray="5 4"/>
+        <text x="173" y="72" text-anchor="middle" font-size="11.5" fill="#ee4c2c">epilogue 槽位</text>
+        <text x="173" y="90" text-anchor="middle" font-size="10.5" fill="#5a6472">读输出的点算(编译+实测裁决)</text>
+        <line x1="102" y1="75" x2="116" y2="75" stroke="#8a929e" marker-end="url(#arr)"/>
+        <line x1="228" y1="75" x2="248" y2="75" stroke="#8a929e" marker-end="url(#arr)"/>
+        <rect x="250" y="55" width="80" height="40" rx="8" fill="#dfe9fd" stroke="#4f8ef7"/>
+        <text x="290" y="80" text-anchor="middle" font-size="12.5">输出 y</text>
+        <text x="120" y="30" font-size="11.5" fill="#5a6472">prologue 槽位:模板输入上的一元、单使用者函数</text>
+        <line x1="59" y1="53" x2="59" y2="28" stroke="#8a929e" stroke-dasharray="4 3"/>
+        <line x1="59" y1="28" x2="120" y2="26" stroke="#8a929e" stroke-dasharray="4 3" marker-end="url(#arr)"/>
+      </svg>
+    </div>
+    <div class="l">
+      <ul class="pts">
+        <li><b>epilogue(GEMM 模板路径):</b>消费者被内联进模板的 store 区域后<b>整体编译 + 实测</b>裁决(<code>benchmark_template_fusion</code> 默认开);<b>允许额外的 load</b> —— bias-add 就是标准用例(模板 operand 与 epilogue operand 共用 buffer 也已处理,<a class="src" href="../../torch/_inductor/codegen/triton.py#L3875">triton.py:3875</a>)。需与 store 索引一致,否则 <code>"epilogue's read and write indices differ"</code>。✅ bias、gelu、scale、dropout(rand+mul);其余组合能否融以「编译成功 + 实测更快」为准。</li>
+        <li><b>「一元读」的字面出处是另一条路径:</b>自定义 Triton kernel(<code>UserDefinedTritonKernel</code>)的 <b>in-place epilogue</b> 要求消费者<b>恰好读 1 个 buffer(该 kernel 改写的输出)、写 1 个 buffer、同索引</b> —— 连多读一个 bias 都会拒(<a class="src" href="../../torch/_inductor/scheduler.py#L10575">scheduler.py:10575</a>,注释:"Any other tensor/s would require additional load expressions")。普通 extern(cuBLAS)输出上则根本无法挂 epilogue(<code>"node1 is extern but not a triton kernel"</code>)。</li>
+        <li><b>prologue</b>(<code>prologue_fusion</code>,OSS 默认开):模板输入上的一元、<b>单使用者</b>函数融进 load,否则 <code>"template prologue can only fuse nodes with a single use"</code>。</li>
+        <li>默认(无 max_autotune)GEMM 走 cuBLAS extern,<b>没有 epilogue 槽位</b>,周围点算各自成 kernel;extern 是天然屏障(<code>"node2 is extern or nop"</code>)。</li>
+        <li>开启 <code>max_autotune_gemm</code> 后,模板 + epilogue 组合在调度期实测后与 ATen 同台比较(见第 6 节)。</li>
+        <li>融合规模上限:<code>max_fusion_size = 64</code> 是<b>调度图 node 数</b>;kernel 内实际串的 aten 表达式数无此硬上限(受 Triton 编译器 / SM 资源约束)。它与「融合 kernel 的算子数」是两个度量,详见 <a href="inductor_fusion_breadth_analysis.md">fusion_breadth_analysis.md §10</a>。</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>5.5 融合评分计算器(共享字节 vs 阈值)</h3>
+  <div class="card">
+    <div class="calc">
+      <div>
+        <label>两个候选共享的中间数据 N(元素个数)= <span id="scN" class="mono">100,000</span></label>
+        <input type="range" id="scRange" min="0.5" max="8" step="0.1" value="5">
+        <label style="display:block;margin-top:8px">dtype</label>
+        <select id="scDtype" class="mono" style="padding:5px;border-radius:6px;border:1px solid var(--line)">
+          <option value="2">fp16 / bf16 (2B)</option>
+          <option value="4">fp32 (4B)</option>
+          <option value="1">int8 (1B)</option>
+        </select>
+      </div>
+      <div>
+        <div style="font-size:13.5px" id="scVerdict"></div>
+        <div class="bar" id="scBar" style="background:var(--pw);margin-top:10px"></div>
+        <div class="hint">判定阈值:score_fusion_memory_threshold = 10 字节(横向融合);<span style="color:#4f8ef7">蓝=通过</span>,<span style="color:#e8a200">橙=aggressive_fusion 放开</span>,<span style="color:#d93025">红=拒绝</span></div>
+        <div style="margin-top:10px"><label style="font-size:13px"><input type="checkbox" id="scAggr"> aggressive_fusion = True(共享数据为 0 也融,非 reduction)</label></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 5 Autotune ============ -->
+<section id="s5">
+  <h2>6. Autotune<small>对候选实现实测选优 —— 以及它保证什么、不保证什么</small></h2>
+  <p class="lead">对同一节点的所有候选(Triton 模板的各组 tile 配置、CUTLASS、ATen/cuBLAS)<b>编译成真 kernel 后逐个实测</b>,取 device time 最小者(<code>benchmark_choices</code>,<a class="src" href="../../torch/_inductor/select_algorithm.py#L5692">select_algorithm.py:5692</a>)。点击模拟一次 addmm 的选型:</p>
+  <div class="card">
+    <button class="btn" id="runAT">▶ 运行 autotune</button>
+    <button class="btn ghost" id="resetAT">重置</button>
+    <div style="margin-top:14px" id="atList"></div>
+    <div id="atPhase2" style="display:none;margin-top:16px;border-top:1px dashed var(--line);padding-top:12px">
+      <b style="font-size:14px">第二阶段:融合是否真的更快?<span class="pill ok">benchmark_template_fusion = True(默认)</span></b>
+      <p class="hint" style="margin:4px 0">调度期把「模板 + epilogue 融合后的 kernel」与「不融合(模板 kernel + 独立 epilogue kernel)」都编出来实测,慢就放弃融合(<a class="src" href="../../torch/_inductor/scheduler.py#L7394">scheduler.py:7394 speedup_by_fusion</a>)。</p>
+      <div id="atList2"></div>
+    </div>
+  </div>
+  <div class="callout gold"><div class="t">⚠️ Autotune 保证的是 kernel device time,不是 E2E</div>
+    <ul class="pts" style="margin:6px 0">
+      <li>计时实现:每对 CUDA event 包住<b>单次调用</b>取 min(<a class="src" href="../../torch/_inductor/runtime/benchmarking.py#L675">benchmarking.py:675</a>),或直接取 kineto trace 里的 kernel 时间(<code>do_bench_using_profiling</code>)—— <b>host 下发开销不在测量范围内</b>。</li>
+      <li>甚至有反向开关 <code>autotune_cudagraph_benchmarking</code>:把候选 capture 进 CUDA graph 再 replay 计时,「eliminates host-side dispatch overhead」,使结果贴近 cudagraph 运行环境。</li>
+      <li>E2E 的下发收益靠结构性假设:融合使 kernel 数单调减少 → 下发次数单调减少;真正的下发优化由 <code>cpp_wrapper</code> / <code>mode="reduce-overhead"</code>(CUDA Graph)承担。</li>
+      <li>因此存在回退盲区:fused kernel GPU 略慢但省一次 launch 的场景会被否决;融合引入 host 开销(item() 同步、动态 shape 重编译)不测。pairwise 局部最优 ≠ 全局最优。</li>
+    </ul>
+  </div>
+  <h3>autotune 的成本与缓存</h3>
+  <ul class="pts">
+    <li>候选编译 + 实测在<b>子进程</b>中进行(<code>autotune_in_subproc</code>),不污染主进程 CUDA context。</li>
+    <li>结果进 autotune 本地缓存(<code>autotune_local_cache</code>),整图结果进 <code>FxGraphCache</code>;同 shape 第二次编译几乎零成本。</li>
+    <li>更细粒度搜索:<code>coordinate_descent_tuning</code>(默认关)在预设 tile 之外逐维爬山,收益可能显著但编译时间大涨。</li>
+  </ul>
+</section>
+
+<!-- ============ 6 真实拓扑 ============ -->
+<section id="s6">
+  <h2>7. 真实模型拓扑讲解<small>BERT 风格 Transformer block —— 三种模式对比</small></h2>
+  <p class="lead">下面是一个带 dropout 的标准 Transformer block 在 ATen 级的展开(LN 按实际行为拆成 stats + normalize 两半显示)。切换模式,观察融合分组、kernel 数量与每个融合决策的理由。</p>
+  <div class="topoWrap">
+    <div style="margin-bottom:10px">
+      <button class="btn seg" id="mEager">Eager(逐算子)</button>
+      <button class="btn seg on" id="mDefault">Inductor 默认</button>
+      <button class="btn seg" id="mMax">+ max_autotune(epilogue/prologue)</button>
+      <span class="hint" style="margin-left:10px">悬停/点击节点查看所在 kernel 的融合说明</span>
+    </div>
+    <svg id="topoSvg" viewBox="0 0 920 810"></svg>
+    <div class="legend">
+      <span><b style="color:#5a6472">同一颜色的方框 = 同一个 fused kernel</b>(左下角 K# 对应下方 kernel 列表编号)</span>
+      <span><i style="background:#eef1f5;border:1px dashed var(--view)"></i>view(不产生 kernel)</span>
+    </div>
+    <div class="cnt" id="topoCnt"></div>
+    <div id="topoNote"></div>
+    <div id="kernelList"></div>
+    <p class="hint">* kernel 数为典型值:同一模型不同 shape / 后端 / config 会略有差异;eager 的 LN、softmax、dropout 各为单个 cuDNN kernel,Inductor 默认模式把 LN 展开为 reduction+pointwise 两个 kernel,靠后续融合把展开的点算链收回。</p>
+  </div>
+</section>
+
+<!-- ============ 7 配置速查 ============ -->
+<section id="s7">
+  <h2>8. 配置速查 & 源码索引</h2>
+  <h3>融合 / autotune 相关默认值(本仓库 main)</h3>
+  <table id="cfgTable"></table>
+  <h3>关键源码位置</h3>
+  <table>
+    <tr><th>内容</th><th>位置</th></tr>
+    <tr><td>融合判定主干(合法性 + 屏障 + 类型规则)</td><td><a class="src" href="../../torch/_inductor/scheduler.py#L10409"><code>scheduler.py:10409 can_fuse</code></a></td></tr>
+    <tr><td>纵向依赖匹配</td><td><a class="src" href="../../torch/_inductor/scheduler.py#L10911"><code>scheduler.py:10911 can_fuse_vertical</code></a></td></tr>
+    <tr><td>共享数据评分(省掉的字节)</td><td><a class="src" href="../../torch/_inductor/scheduler.py#L11336"><code>scheduler.py:11336 score_fusion_memory</code></a></td></tr>
+    <tr><td>启发式(阈值 / max_fusion_size / 峰值显存)</td><td><a class="src" href="../../torch/_inductor/choices.py#L667"><code>choices.py:667 InductorChoices.can_fuse</code></a></td></tr>
+    <tr><td>模板融合实测(fused vs unfused)</td><td><a class="src" href="../../torch/_inductor/scheduler.py#L7394"><code>scheduler.py:7394 speedup_by_fusion</code></a></td></tr>
+    <tr><td>候选实测(Triton/CUTLASS/ATen 同台)</td><td><a class="src" href="../../torch/_inductor/select_algorithm.py#L5692"><code>select_algorithm.py:5692 benchmark_choices</code></a></td></tr>
+    <tr><td>计时实现(event pairs, min)</td><td><a class="src" href="../../torch/_inductor/runtime/benchmarking.py#L675"><code>runtime/benchmarking.py:675 benchmark_gpu</code></a></td></tr>
+    <tr><td>ATen 归一化 + Inductor 自有 decomp</td><td><a class="src" href="../../torch/_inductor/decomposition.py#L117"><code>decomposition.py:117</code></a></td></tr>
+    <tr><td>aten → Inductor IR 注册表</td><td><a class="src" href="../../torch/_inductor/lowering.py#L1177"><code>lowering.py(register_lowering)</code></a></td></tr>
+    <tr><td>philox 融合 RNG(dropout 可融的根据)</td><td><a class="src" href="../../torch/_inductor/lowering.py#L3087"><code>lowering.py:3087 philox_rand</code></a></td></tr>
+    <tr><td>FX 节点分派到 lowering(查表即执行)</td><td><a class="src" href="../../torch/_inductor/graph.py#L1465"><code>graph.py:1465 call_function</code></a></td></tr>
+    <tr><td>pointwise 的「buffer + 闭包」构造</td><td><a class="src" href="../../torch/_inductor/lowering.py#L771"><code>lowering.py:771 make_pointwise</code></a></td></tr>
+    <tr><td>IR 载体类(TensorBox / ComputedBuffer / Pointwise)</td><td><a class="src" href="../../torch/_inductor/ir.py#L1137"><code>ir.py:1137 TensorBox.create · :5644 ComputedBuffer · :1253 Pointwise</code></a></td></tr>
+    <tr><td>IR 登记与命名 op{N}</td><td><a class="src" href="../../torch/_inductor/graph.py#L1173"><code>graph.py:1173 register_operation</code></a></td></tr>
+    <tr><td>IR → 调度 node 一对一包装</td><td><a class="src" href="../../torch/_inductor/scheduler.py#L6398"><code>scheduler.py:6398 create_scheduler_node</code></a></td></tr>
+  </table>
+</section>
+
+<footer>
+  <div class="wrap">本页由 AI 协助整理,内容以本仓库 main 分支源码为准;行号随上游演进而漂移,点击链接在本地仓库中核对。<br>
+  相关文档:<a href="inductor_fusion_breadth_analysis.md">inductor_fusion_breadth_analysis.md</a>(融合广度的完整源码分析)</div>
+</footer>
+
+</div>
+
+<script>
+"use strict";
+const $=id=>document.getElementById(id);
+const TYPE_COLOR={pw:"#4f8ef7",red:"#9b59d0",tpl:"#ee4c2c",ext:"#8a929e",view:"#9aa2ad"};
+const TYPE_NAME={pw:"pointwise",red:"reduction",tpl:"GEMM模板",ext:"extern",view:"view"};
+
+/* ============ 1 整体流程 ============ */
+const STAGES=[
+ {n:"1",t:"TorchDynamo",s:"Python 字节码 → torch 级 FX graph",
+  inp:"Python 模型代码",out:"torch.* 调用级 FX graph(含控制流 Guard)",
+  desc:"按帧级字节码解释,把 Python 函数捕获成 FX graph;遇到不支持的构造(数据依赖控制流等)触发 graph break 回退 eager。",
+  files:[["torch/_dynamo/","Dynamo 主目录"]],
+  pts:["每个图有编译 Guard,输入变化(如 shape)不满足时重编译","此处图还是 torch 级算子,与 Inductor 无关"]},
+ {n:"2",t:"AOTAutograd",s:"functionalize + 联合正反向",
+  inp:"torch 级 FX graph",out:"ATen 级 FX graph(前向 + 反向)",
+  desc:"预先追踪出反向图并做 functionalization:in-place / view 操作改写成纯函数式 ATen。产物是 Inductor 实际接受的输入契约。",
+  files:[["torch/_functorch/aot_autograd.py","AOTAutograd 实现"]],
+  pts:["输出算子集合已收敛到 ATen 命名空间","mutation 被改写,为融合扫清一大类障碍"]},
+ {n:"3",t:"ATen 归一化",s:"core ATen decomposition",
+  inp:"ATen 级图",out:"core ATen 图(算子集更小更规范)",
+  desc:"decompositions = {**core_aten_decompositions(), **inductor_decompositions}:核心归一化 + Inductor 挑选的展开(_softmax、native_layer_norm、gelu、mm/bmm/cat 特殊处理等)。注意这是 aten→aten,不是 prim 级。",
+  files:[["torch/_inductor/decomposition.py:117","表组装"],["torch/_decomp/","core ATen decompositions"]],
+  pts:["故意只展开一部分:保住单 pass softmax、Welford 等数值性质","LN/softmax 展开后才可能被调度器按 red+pw 处理"]},
+ {n:"4",t:"Post-grad 图优化",s:"ATen 级 pattern matching",
+  inp:"core ATen 图",out:"语义等价、对融合更友好的图",
+  desc:"基于 pattern matcher 的 pass:conv+bn 折叠、gelu/silu 变体归一、组合 mode 改写等。在 lowering 之前做,让后续融合看到规整的模式。",
+  files:[["torch/_inductor/fx_passes/post_grad.py","pass 入口"]],
+  pts:["这一层不生成代码,只改图","复杂算子融合决策(模板相关)在调度期再定"]},
+ {n:"5",t:"Lowering",s:"aten op → Inductor IR",
+  inp:"core ATen 图",out:"ir.TensorBox / ComputedBuffer 等中间表示",
+  desc:"按 @register_lowering(aten.xxx) 注册表逐算子下沉:pointwise → make_pointwise;reduction → make_reduction;GEMM/conv → 模板或 FallbackKernel。未注册的算子一律 FallbackKernel(extern 调用 ATen)。",
+  files:[["torch/_inductor/lowering.py","注册表(155+ 个)"]],
+  pts:["这一步决定了每个算子是「可融载体」还是「屏障」","philox RNG 在此降级为 kernel 内随机数(lowering.py:3087)","define-by-run 逐步演示见第 2 节"]},
+ {n:"6",t:"Scheduler 融合",s:"依赖分析 + can_fuse + 评分",
+  inp:"Inductor IR 依赖 DAG",out:"fused node 分组(调度顺序)",
+  desc:"构建 SchedulerNode 依赖图,贪心按 score_fusion 从高到低尝试两两融合:纵向(生产者→消费者)与横向(平行支路)分别过合法性 + 启发式;模板 epilogue/prologue 在此决定,可开启逐对实测(benchmark_template_fusion / benchmark_fusion)。",
+  files:[["torch/_inductor/scheduler.py:10409","can_fuse 主干"],["torch/_inductor/choices.py:667","启发式"]],
+  pts:["max_fusion_size=64 限制调度图 node 数","峰值显存门控:融合会推高峰值时拒绝"]},
+ {n:"7",t:"Codegen + Wrapper",s:"Triton/C++ kernel + 调用器",
+  inp:"fused node 分组",out:"Triton kernel 源码 + Python/cpp wrapper",
+  desc:"每个 fused node 生成 Triton(CUDA 类设备)或 C++(CPU)kernel;autotune 在子进程实测候选后定稿;最后生成 wrapper 串起所有 kernel。cpp_wrapper 可把 wrapper 编成 C++ 大幅降低单 kernel 下发开销;mode=reduce-overhead 再套 CUDA Graph。",
+  files:[["torch/_inductor/codegen/","代码生成"],["torch/_inductor/autotune_process.py","autotune 子进程"]],
+  pts:["async_compile 并行编译 kernel","FxGraphCache 缓存整图产物,二次编译近零成本"]}
+];
+function renderStages(){
+  $("steps").innerHTML=STAGES.map((s,i)=>`<div class="step${i===0?" on":""}" data-i="${i}"><div class="n">阶段 ${s.n}</div><div class="t">${s.t}</div><div class="s">${s.s}</div></div>`).join("");
+  document.querySelectorAll("#steps .step").forEach(el=>el.onclick=()=>showStage(+el.dataset.i));
+  showStage(0);
+}
+function showStage(i){
+  document.querySelectorAll("#steps .step").forEach((el,j)=>el.classList.toggle("on",j===i));
+  const s=STAGES[i];
+  $("stageCard").innerHTML=`<h4>阶段 ${s.n} · ${s.t}</h4>
+   <div class="kv"><div><b>输入</b> ${s.inp}</div><div><b>输出</b> ${s.out}</div></div>
+   <p style="font-size:14px;margin:6px 0">${s.desc}</p>
+   <ul class="pts">${s.pts.map(p=>`<li>${p}</li>`).join("")}</ul>
+   <div class="src">源码:${s.files.map(f=>`<a href="../../${f[0]}"><code>${f[0]}</code></a>`).join(" · ")}</div>`;
+}
+renderStages();
+
+/* ============ 2 Lowering ============ */
+const LSTEPS=[
+ {chip:"aten.relu.default",sub:"1 → 1 pointwise",
+  fx:"target: aten.relu.default\nargs: (x,)",
+  tbl:"@register_lowering(aten.relu) = make_pointwise(lambda a: ops.relu(a))",
+  runs:"loaders = [x.make_loader()]     # 上游 TensorBox 的 load 闭包\ndef inner_fn(i):            # 描述「怎么逐点算出本 buffer」\n    return ops.relu(loaders[0](i))\nreturn Pointwise.create(device, dtype, inner_fn, ranges=x.size())",
+  chain:"TensorBox( StorageBox( ComputedBuffer(data=Pointwise) ) )",
+  short:"ComputedBuffer(data=Pointwise)",
+  fn:"inner_fn(i) = ops.relu(load(x)[i])",
+  note:"1 个 FX 节点 → 1 个 IR buffer 条目;闭包极薄,只有一层 ops.relu"},
+ {chip:"aten.mul.Tensor",sub:"1 → 1,双输入",
+  fx:"target: aten.mul.Tensor\nargs: (t1, y)",
+  tbl:"@register_lowering(aten.mul) = make_pointwise(lambda a, b: ops.mul(a, b))",
+  runs:"loaders = [t1.make_loader(), y.make_loader()]\ndef inner_fn(i):\n    return ops.mul(loaders[0](i), loaders[1](i))\nreturn Pointwise.create(device, dtype, inner_fn, ranges=x.size())",
+  chain:"TensorBox( StorageBox( ComputedBuffer(data=Pointwise) ) )",
+  short:"ComputedBuffer(data=Pointwise)",
+  fn:"inner_fn(i) = ops.mul(load(t1)[i], load(y)[i])",
+  note:"loaders 引用上游闭包:codegen 时逐层内联,这正是融合的原料"},
+ {chip:"aten.add.Tensor",sub:"标量不占条目",
+  fx:"target: aten.add.Tensor\nargs: (t2, 1.0)",
+  tbl:"@register_lowering(aten.add) = make_pointwise(...);入参先过 promote_constants",
+  runs:"inputs = promote_constants([t2, 1.0])   # 标量收进闭包,不产生 buffer\nloaders = [t2.make_loader()]\ndef inner_fn(i):\n    return ops.add(loaders[0](i), 1.0)\nreturn Pointwise.create(device, dtype, inner_fn, ranges=x.size())",
+  chain:"TensorBox( StorageBox( ComputedBuffer(data=Pointwise) ) )",
+  short:"ComputedBuffer(data=Pointwise)",
+  fn:"inner_fn(i) = ops.add(load(t2)[i], 1.0)",
+  note:"1.0 变成闭包里的字面量:标量在 lowering 这一层就被消化掉"},
+ {chip:"aten.sum.SymInt",sub:"1 → 1 reduction",
+  fx:"target: aten.sum.SymInt\nargs: (t3, dim=[1])",
+  tbl:"@register_lowering(aten.sum) = make_reduction(...)",
+  runs:"loaders = [t3.make_loader()]\ndef inner_fn(i, k):         # 两个索引:输出索引 + 规约索引\n    return ops.add(acc, loaders[0]([i, k]))\nreturn Reduction.create(ranges=[M], reduction_ranges=[K], ...)",
+  chain:"TensorBox( StorageBox( ComputedBuffer(data=Reduction) ) )",
+  short:"ComputedBuffer(data=Reduction)",
+  fn:"inner_fn(i, k) = ops.add(acc, load(t3)[i, k])",
+  note:"Reduction 同属 Loops 家族;上游 pointwise 将来可融进它的循环体"}
+];
+function hl(t){return t.replace(/(#.*)$/gm,'<span class="cm">$1</span>')}
+let lI=0;
+function lRender(){
+  const s=LSTEPS[lI];
+  $("lSteps").innerHTML=LSTEPS.map((t,i)=>`<div class="step${i===lI?" on":""}" data-i="${i}"><div class="n">FX 节点 ${i}</div><div class="t mono" style="font-size:12px">${t.chip}</div><div class="s">${t.sub}</div></div>`).join("");
+  document.querySelectorAll("#lSteps .step").forEach(el=>el.onclick=()=>{lI=+el.dataset.i;lRender();});
+  $("lFx").innerHTML=`<pre class="code">${hl(s.fx)}</pre>`;
+  $("lMid").innerHTML=`<div class="mono" style="font-size:12px">${s.tbl}</div><pre class="code">${hl(s.runs)}</pre>`;
+  $("lIrP").innerHTML=`<pre class="code">${hl(s.chain)}</pre><div class="mono" style="font-size:12px;margin-top:6px">${s.fn}</div><div class="hint" style="margin-top:6px">${s.note}</div>`;
+  $("lIR").innerHTML=LSTEPS.slice(0,lI+1).map((t,j)=>`<div class="irrow${j===lI?" on":""}">op${j}  ${t.short}  <span class="fn">// ${t.fn}</span></div>`).join("");
+  $("lCnt").textContent=`FX 节点 ${lI+1} / ${LSTEPS.length}`;
+}
+$("lPrev").onclick=()=>{if(lI>0){lI--;lRender();}};
+$("lNext").onclick=()=>{if(lI<LSTEPS.length-1){lI++;lRender();}};
+lRender();
+
+const DRIFT=[
+ {t:"① decompose:1 → N",ex:"aten.native_layer_norm 展开",pill:"aten→aten,lowering 之前",cls:"warn",
+  lines:[["decompositions = core_aten_decompositions + inductor_decompositions","torch/_inductor/decomposition.py"],["native_layer_norm → mean/sub/rsqrt/mul/add…:1 个 FX 节点变 N 个,各自 lower 成独立 IR 条目","LN 整链最终只落成 reduction + pointwise 两个条目(见第 7 节拓扑)"]]},
+ {t:"② 复合 lowering:N → 1",ex:"dropout(philox) / MultiOutput",pill:"一个 handler 发 N 个 IR",cls:"ok",
+  lines:[["rand 在 kernel 内用 philox 生成 + mask + mul 收进同一个 ComputedBuffer","lowering.py:3087 philox_rand"],["max_pool2d_with_indices → MultiOutput:一个 op 出 2 个 buffer,同属此类","多输出 node 的 epilogue 融合因此受限"]]},
+ {t:"③ view 类:1 → 0",ex:"slice / permute / expand",pill:"不产生 IR 条目",cls:"warn",
+  lines:[["view/slice/permute/expand 无 kernel、无 buffer:只改写下游 load 的索引表达式","所以第 7 节拓扑的 views 组不占 kernel 数"],["对调度器透明,但施加 layout 约束(「different buf layouts」拒绝融合的来源)","scheduler.py can_fuse 的屏障之一"]]},
+ {t:"④ 未注册:1 → 1 屏障",ex:"unsupported aten → FallbackKernel",pill:"ExternKernel,不可融",cls:"no",
+  lines:[["make_fallback 包装成 FallbackKernel(ExternKernel 子类),运行时直调 ATen 库","why: node2 is extern or nop"],["这个条目没有 inner_fn 闭包:它是「库调用」,不是「buffer + 闭包」","开启 max_autotune 时部分(如 GEMM)可换模板重新参战"]]}
+];
+function renderDrift(){
+  $("driftGrid").innerHTML=DRIFT.map((d,i)=>`<div class="op" data-i="${i}"><span class="pill ${d.cls}">${d.pill}</span><br><b>${d.t}</b><div class="ex">${d.ex}</div></div>`).join("");
+  document.querySelectorAll("#driftGrid .op").forEach(el=>el.onclick=()=>{
+    document.querySelectorAll("#driftGrid .op").forEach((e,j)=>e.classList.toggle("on",j===+el.dataset.i));
+    const d=DRIFT[+el.dataset.i];
+    $("driftDetail").style.display="block";
+    $("driftDetail").innerHTML=`<div class="t">${d.t}</div>${d.lines.map(l=>`<div style="margin:4px 0">${l[0]}<span class="src" style="display:block">${l[1]}</span></div>`).join("")}`;
+  });
+}
+renderDrift();
+
+/* ============ 2 融合本质 ============ */
+function calcTraffic(){
+  const N=Math.round(Math.pow(10,+$("nRange").value));
+  const BW=+$("bwSel").value*1e9; // bytes/s
+  $("nLabel").textContent=N.toLocaleString();
+  const bUF=8*N,bFU=4*N;
+  const maxB=Math.max(bUF,bFU);
+  $("barUF").style.width=(bUF/maxB*100)+"%";$("barFU").style.width=(bFU/maxB*100)+"%";
+  const tUF=bUF/BW*1000,tFU=bFU/BW*1000;
+  $("tUF").textContent=tUF.toFixed(tUF<0.1?3:2);$("tFU").textContent=tFU.toFixed(tFU<0.1?3:2);
+  const launchUS=8; // 典型每次下发+launch ~8us(含 python wrapper 开销时更高)
+  const save=tUF-tFU;
+  let regime;
+  if(tFU*1000<launchUS*0.5) regime=`<b>小 kernel 区</b>:kernel 本身只有 ${(tFU*1000).toFixed(1)} µs,时间由 launch / 下发主导。融合在此类负载上的 E2E 收益主要来自「少一次下发」,这正是搜广推小算子密集场景的主体。`;
+  else regime=`<b>大 kernel 区</b>:收益由带宽主导,融合省一次 HBM round-trip,device 时间约 ${((tUF/tFU)).toFixed(2)}×。`;
+  $("regime").innerHTML=regime;
+  $("calcMsg").innerHTML=`流量:${(bUF/1e6).toFixed(1)} MB → ${(bFU/1e6).toFixed(1)} MB(<b>省 50%</b>);launch:2 → 1(每次约 ${launchUS} µs,乘上 kernel 数就是 E2E)。`;
+}
+$("nRange").oninput=calcTraffic;$("bwSel").onchange=calcTraffic;calcTraffic();
+
+/* ============ 3 融合范围 ============ */
+const OPS=[
+ {t:"Pointwise",ex:"add / mul / gelu / where",s:"ok",
+  d:"融合的主力载体。同循环域(形状与索引一致,broadcast 可解)的点算可任意串链:每个中间张量留在寄存器。produce-consume 逐点匹配即可纵向融。"},
+ {t:"Reduction",ex:"sum / max / mean / softmax 内部",s:"ok",
+  d:"可与周围 pointwise 融:pw 生产者融进 reduction 的 loop;输出后的点链也可继续融。行能放进 SMEM 时用 persistent reduction,softmax 整链(max→exp→sum→div)缩成 1 个 kernel(persistent_reductions 默认开)。"},
+ {t:"GEMM(mm/addmm/bmm)",ex:"线性层",s:"warn",
+  d:"默认走 cuBLAS extern = 融合屏障。开 max_autotune_gemm 后有 Triton/CUTLASS 模板,模板带 epilogue 槽位(读输出的点算:允许额外 load,如 bias/gelu/scale/dropout)与 prologue 槽位(输入上的一元单使用者函数)。"},
+ {t:"Convolution",ex:"conv2d / conv_transpose2d",s:"warn",
+  d:"同 GEMM:默认 extern 屏障;max_autotune 时走 conv 模板,支持 epilogue。推理常见的 conv+bn 已在 post-grad pass 折叠。"},
+ {t:"RNG(dropout/bernoulli)",ex:"nn.Dropout",s:"ok",
+  d:"例外地「可融」:rand 用 philox 在 kernel 内生成(lowering.py:3087),mask+mul 作为一个 pointwise 参与融合 —— eager 里这是单独 kernel。fallback_random=True 可关掉。"},
+ {t:"Extern / Fallback",ex:"unsupported 算子、cuBLAS 调用",s:"no",
+  d:"硬屏障:ExternKernel 直接调 ATen 库函数,Inductor 不生成其代码,任何节点都不能与它融(除非它本身换成模板)。why 串:\"node2 is extern or nop\"。"},
+ {t:"变异 / 多输出 / 视图",ex:"copy_ / max_pool2d_with_indices / slice",s:"no",
+  d:"mutation 需独立调度(写顺序不可换);多输出模板 epilogue 受限;view/slice/permute 本身无 kernel,但会施加 layout 约束 —— 冲突时报 \"node1 and node2 uses different buf layouts\"。"},
+ {t:"跨设备 / 主机同步",ex:"cpu scalar、item()",s:"no",
+  d:"\"device mismatch (cuda vs cpu)\" 直接拒绝;item() 等隐式 D2H 同步把图切断。这类也是 autotune 看不到的 E2E 隐性成本。"}
+];
+function renderOps(){
+  const badge={ok:'<span class="pill ok">✅ 可融</span>',warn:'<span class="pill warn">⚠️ 受限</span>',no:'<span class="pill no">⛔ 屏障</span>'};
+  $("opGrid").innerHTML=OPS.map((o,i)=>`<div class="op${i===0?" on":""}" data-i="${i}"><b>${o.t}</b> ${badge[o.s]}<div class="ex">${o.ex}</div></div>`).join("");
+  document.querySelectorAll("#opGrid .op").forEach(el=>el.onclick=()=>{
+    document.querySelectorAll("#opGrid .op").forEach(e=>e.classList.remove("on"));el.classList.add("on");
+    const o=OPS[+el.dataset.i];
+    $("opDetail").style.display="block";
+    $("opDetail").innerHTML=`<b>${o.t}</b><br>${o.d}`;
+  });
+  $("opDetail").style.display="block";$("opDetail").innerHTML=`<b>${OPS[0].t}</b><br>${OPS[0].d}`;
+}
+renderOps();
+
+/* 场景 SVG 小图生成 */
+function miniSvg(nodes){
+  let s=`<svg viewBox="0 0 230 70">`;
+  nodes.forEach((n,i)=>{
+    const x=10+ (i%3)*74, y=14;
+    s+=`<rect x="${x}" y="${y}" width="66" height="34" rx="7" fill="${n.f||"#dfe9fd"}" stroke="${n.c||"#4f8ef7"}"/><text x="${x+33}" y="${y+21}" text-anchor="middle" font-size="10">${n.t}</text>`;
+    if(i<nodes.length-1 && (i%3)<2) s+=`<line x1="${x+66}" y1="${y+17}" x2="${x+72}" y2="${y+17}" stroke="#8a929e" marker-end="url(#arr)"/>`;
+  });
+  return s+"</svg>";
+}
+const SCENARIOS=[
+ {t:"① 点链:gelu → add bias",svg:[{t:"gelu(x)"},{t:"+bias"}],
+  q:"同 shape 一元链",try:()=>({v:"v-ok",h:"✅ 融合",lines:[["依赖匹配:消费者读的正是生产者写的缓冲,索引逐点一致",""],["共享数据 = t 的字节数 ≥ 10,未超 max_fusion_size=64",""],["合成 1 个 kernel:gelu 的结果不出寄存器",""]]})},
+ {t:"② 点算 → FallbackKernel",svg:[{t:"gelu(x)",f:"#fbe7e2",c:"#ee4c2c"},{t:"conv2d",f:"#eceff3",c:"#8a929e"}],
+  q:"conv 未开模板",try:()=>({v:"v-no",h:"⛔ 拒绝融合",lines:[["why: node2 is extern or nop","extern kernel 调 cuBLAS/cuDNN,Inductor 不生成其代码,是硬屏障"],["出路:开 max_autotune 让 conv 走模板(带 epilogue),或把 conv 前后点算留在 conv 另一侧融",""]]})},
+ {t:"③ GEMM 模板 → gelu",svg:[{t:"mm 模板",f:"#fbe7e2",c:"#ee4c2c"},{t:"gelu",f:"#fbe7e2",c:"#ee4c2c"}],
+  q:'<label style="font-size:12.5px"><input type="checkbox" id="sc3mt" checked> max_autotune_gemm</label>',
+  try:()=>{const on=$("sc3mt")&&$("sc3mt").checked;return on?
+   {v:"v-ok",h:"✅ epilogue 融合",lines:[["gelu 只读一次输出且与 store 索引一致 → 内联进模板 store 区域编译通过","结果不出寄存器;调度期还会把「融合版 vs 不融合版」实测比较(benchmark_template_fusion 默认开)",""]]}:
+   {v:"v-no",h:"⛔ 无模板则无 epilogue",lines:[["why: node1 is extern but not a triton kernel","GEMM 退化为 cuBLAS extern,周围点算无法挂载"],["gelu 只能独立成 kernel,但可继续与下游点算纵向融",""]]};}},
+ {t:"④ 平行支路无共享数据",svg:[{t:"a = f(x)"},{t:"b = g(y)"}],
+  q:"a、b 互不依赖且读不同输入",try:()=>({v:"v-no",h:"⛔ 默认拒绝",lines:[["why: no shared data","score_fusion_memory = 0 < 阈值 10 字节"],["aggressive_fusion=True 且非 reduction 时放开(逐对合并或 combo kernel)","注意放开后仅省 launch,不省带宽;小 kernel 场景仍可能划算"]]})}
+];
+function renderSc(){
+  $("scGrid").innerHTML=SCENARIOS.map((s,i)=>`<div class="sc"><b style="font-size:14px">${s.t}</b><div class="hint">${s.q}</div>${miniSvg(s.svg)}<button class="btn ghost" data-i="${i}" style="margin-top:8px;font-size:13px;padding:5px 14px">尝试融合</button><div class="verdict" id="vd${i}"></div></div>`).join("");
+  document.querySelectorAll(".sc .btn").forEach(b=>b.onclick=()=>{
+    const r=SCENARIOS[+b.dataset.i].try();const el=$("vd"+b.dataset.i);
+    el.className="verdict "+r.v;
+    el.innerHTML=`<b>${r.h}</b>${r.lines.map(l=>`<br>• ${l[0]}<span class="why">${l[1]}</span>`).join("")}`;
+  });
+}
+renderSc();
+
+/* ============ 4.1 纵向融合动画 ============ */
+const VSTEPS=[
+ {f:["#dfe9fd","#dfe9fd","#eadcfb"],k:3,io:"访存: 3 load + 3 store",log:"每个中间张量都过一次 HBM",
+  txt:"三个独立 kernel:t0、t1 各写回 HBM 再读回。sum 的 kernel 里 gelu 无法参与。"},
+ {f:["#b9d4fb","#b9d4fb","#eadcfb"],k:2,io:"访存: 2 load + 2 store",log:"t0 消失于寄存器",
+  txt:"can_fuse( producer=t0, consumer=t1 ):依赖逐点匹配、共享数据>0、无环 → add+gelu 合并。省 1 次 round-trip + 1 次 launch。"},
+ {f:["#b08ce2","#b08ce2","#b08ce2"],k:1,io:"访存: 1 load + 1 store",log:"整条链进一个 kernel",
+  txt:"pointwise 生产者(add、gelu)融入 reduction 的 loop:每个元素先算 pw 再参与归约。x 只读一次,y 只写一次。"}
+];
+function vshow(i){
+  const v=VSTEPS[i];
+  ["vn0","vn1","vn2"].forEach((id,j)=>{$(id).setAttribute("fill",v.f[j])});
+  $("vCount").textContent=v.k+" 个 kernel";$("vIO").textContent=v.io;$("vLog").textContent=v.log;
+  $("vText").innerHTML=v.txt;
+  for(let j=0;j<3;j++)$("vStep"+j).classList.toggle("on",j===i);
+}
+["vStep0","vStep1","vStep2"].forEach((id,i)=>$(id).onclick=()=>vshow(i));vshow(0);
+
+/* 4.4 评分计算器 */
+function scoreCalc(){
+  const N=Math.round(Math.pow(10,+$("scRange").value));
+  const B=+$("scDtype").value;
+  $("scN").textContent=N.toLocaleString();
+  const score=N*B;
+  const thr=10,maxW=Math.max(score,thr*2);
+  $("scBar").style.width=Math.min(100,score/maxW*100)+"%";
+  const aggr=$("scAggr").checked;
+  let v,ok;
+  if(score>=thr){ok=true;v=`✅ score = ${score.toLocaleString()} 字节 ≥ 阈值 10 → 允许融合(还需过 max_fusion_size / 峰值显存检查)`;}
+  else if(aggr){ok=true;v=`⚠️ score = ${score} 字节 < 10,但 aggressive_fusion=True(且非 reduction)→ 放开`;$("scBar").style.background="#e8a200";}
+  else{ok=false;v=`⛔ score = ${score} 字节 < 阈值 10 → "score_fusion_memory_threshold" 拒绝(省的字节太少,不值得合并循环)`;$("scBar").style.background="#d93025";}
+  if(ok)$("scBar").style.background= aggr&&score<thr ? "#e8a200":"#4f8ef7";
+  $("scVerdict").innerHTML=v;
+}
+$("scRange").oninput=scoreCalc;$("scDtype").onchange=scoreCalc;$("scAggr").onchange=scoreCalc;scoreCalc();
+
+/* ============ 5 autotune ============ */
+const CANDS=[
+ {n:"Triton cfg A (BLOCK 128×64×64, 4 warps)",ms:0.31,cls:"ms1"},
+ {n:"Triton cfg B (BLOCK 64×128×64, 8 warps)",ms:0.24,cls:"ms2"},
+ {n:"Triton cfg C (BLOCK 64×64×32, 4 warps)",ms:0.42,cls:"ms3"},
+ {n:"CUTLASS (tensor core)",ms:0.38,cls:"ms4"},
+ {n:"ATen cuBLAS(不融合回退)",ms:0.29,cls:"ms0"},
+];
+const CANDS2=[
+ {n:"融合:cfgB 模板 + bias+gelu epilogue",ms:0.22,cls:"ms5"},
+ {n:"不融合:cfgB kernel(0.24)+ 独立 epilogue kernel(0.08)",ms:0.32,cls:"ms0"},
+];
+function resetAT(){
+  $("atList").innerHTML="";$("atPhase2").style.display="none";
+  $("runAT").disabled=false;
+}
+function runAT(){
+  $("runAT").disabled=true;
+  const maxMs=Math.max(...CANDS.map(c=>c.ms));
+  $("atList").innerHTML=CANDS.map((c,i)=>`<div class="cand ${c.cls}" id="cand${i}"><div class="nm">${c.n}</div><div class="bw"><div class="bf"></div></div></div>`).join("");
+  CANDS.forEach((c,i)=>{
+    setTimeout(()=>{const bf=document.querySelector(`#cand${i} .bf`);bf.style.width=(c.ms/maxMs*100)+"%";bf.textContent=c.ms.toFixed(2)+" ms";},120*i+80);
+  });
+  const win=CANDS.reduce((a,b)=>a.ms<b.ms?a:b);
+  setTimeout(()=>{$("cand"+CANDS.indexOf(win)).classList.add("win");
+    setTimeout(()=>{
+      $("atPhase2").style.display="block";
+      const maxMs2=Math.max(...CANDS2.map(c=>c.ms));
+      $("atList2").innerHTML=CANDS2.map((c,i)=>`<div class="cand ${c.cls}" id="cand2${i}"><div class="nm">${c.n}</div><div class="bw"><div class="bf"></div></div></div>`).join("");
+      CANDS2.forEach((c,i)=>{setTimeout(()=>{const bf=document.querySelector(`#cand2${i} .bf`);bf.style.width=(c.ms/maxMs2*100)+"%";bf.textContent=c.ms.toFixed(2)+" ms";},120*i+80);});
+      setTimeout(()=>{const w2=CANDS2.reduce((a,b)=>a.ms<b.ms?a:b);$("cand2"+CANDS2.indexOf(w2)).classList.add("win");
+        $("atList2").insertAdjacentHTML("beforeend",`<div class="hint" style="margin-top:6px">融合版更快 → 采用模板+epilogue;若不融合版更快,Inductor 会放弃融合保留物化中间张量(数值均为示例)。</div>`);
+      },120*CANDS2.length+300);
+    },1300);
+  },120*CANDS.length+300);
+}
+$("runAT").onclick=runAT;$("resetAT").onclick=resetAT;
+
+/* ============ 6 真实拓扑 ============ */
+const COL_X=[20,250,480], NODE_W=200, NODE_H=42, ROW_H=58, TOP=56;
+const NODES=[
+ {id:"add1",c:0,r:0,t:"add(x, residual)",k:"pw"},
+ {id:"lnAs",c:0,r:1,t:"LN① stats (mean,rstd)",k:"red",dec:1},
+ {id:"lnAn",c:0,r:2,t:"LN① normalize",k:"pw",dec:1},
+ {id:"mmqkv",c:0,r:3,t:"addmm → QKV",k:"gemm"},
+ {id:"views",c:0,r:4,t:"split / transpose(view)",k:"view"},
+ {id:"bmm1",c:0,r:5,t:"bmm: Q·Kᵀ",k:"gemm"},
+ {id:"scale",c:0,r:6,t:"× 1/√d (pw)",k:"pw"},
+ {id:"softmax",c:0,r:7,t:"softmax(−1)",k:"red"},
+ {id:"drop1",c:0,r:8,t:"dropout① (rand+mul)",k:"pw"},
+ {id:"bmm2",c:0,r:9,t:"bmm: att·V",k:"gemm"},
+ {id:"mmproj",c:1,r:0,t:"addmm → proj",k:"gemm"},
+ {id:"drop2",c:1,r:1,t:"dropout② (rand+mul)",k:"pw"},
+ {id:"add2",c:1,r:2,t:"add(proj, h)",k:"pw"},
+ {id:"lnBs",c:1,r:3,t:"LN② stats",k:"red",dec:1},
+ {id:"lnBn",c:1,r:4,t:"LN② normalize",k:"pw",dec:1},
+ {id:"mmfc1",c:1,r:5,t:"addmm → fc1",k:"gemm"},
+ {id:"gelu",c:1,r:6,t:"gelu (pw)",k:"pw"},
+ {id:"drop3",c:1,r:7,t:"dropout③ (rand+mul)",k:"pw"},
+ {id:"mmfc2",c:2,r:0,t:"addmm → fc2",k:"gemm"},
+ {id:"drop4",c:2,r:1,t:"dropout④ (rand+mul)",k:"pw"},
+ {id:"add3",c:2,r:2,t:"add(fc2, h)",k:"pw"},
+ {id:"lnCs",c:2,r:3,t:"LN③ stats",k:"red",dec:1},
+ {id:"lnCn",c:2,r:4,t:"LN③ normalize",k:"pw",dec:1},
+];
+/* 分列边界:第 0 列含 NODES[0..9](idx 0-9),第 1 列 10-17,第 2 列 18-22 */
+const COL_OF={};NODES.forEach((n,i)=>COL_OF[n.id]=i<10?0:(i<18?1:2));
+/* 重排 r:按列内顺序重编号 */
+(function(){const cnt=[0,0,0];NODES.forEach(n=>{n.c=COL_OF[n.id];n.r=cnt[n.c]++;});})();
+
+const MODES={
+ eager:{name:"Eager(逐算子执行)",note:"eager:每个 ATen 调用 = 一次 cuDNN/cuBLAS/eager kernel launch,dispatch 走完整 C10 dispatcher。LN / softmax / dropout 各为单个算子 kernel。",
+  groups:[
+   {m:["add1"],t:"pw"},{m:["lnAs","lnAn"],t:"ext",k:"LN eager kernel"},{m:["mmqkv"],t:"ext",k:"cublasLt(bias 内部 epilogue)"},
+   {m:["views"],t:"view"},{m:["bmm1"],t:"ext"},{m:["scale"],t:"pw"},{m:["softmax"],t:"red",k:"softmax eager kernel"},
+   {m:["drop1"],t:"pw",k:"native_dropout"},{m:["bmm2"],t:"ext"},{m:["mmproj"],t:"ext"},{m:["drop2"],t:"pw"},
+   {m:["add2"],t:"pw"},{m:["lnBs","lnBn"],t:"ext",k:"LN eager kernel"},{m:["mmfc1"],t:"ext"},{m:["gelu"],t:"pw"},
+   {m:["drop3"],t:"pw"},{m:["mmfc2"],t:"ext"},{m:["drop4"],t:"pw"},{m:["add3"],t:"pw"},{m:["lnCs","lnCn"],t:"ext",k:"LN eager kernel"}]},
+ default:{name:"Inductor 默认(无 max_autotune)",note:"GEMM 走 extern(屏障,不能挂 epilogue);点算链与 reduction 融合;LN 展开成 red+pw,再把周围 pw 链吸进 red;dropout 靠 philox 融进 pointwise;softmax 用 persistent reduction 一气呵成。",
+  groups:[
+   {m:["add1","lnAs"],t:"red",note:"pw(add) 融进 reduction 的 loop:residual 加法与 mean/rstd 统计同 kernel,residual 不落 HBM。"},
+   {m:["lnAn"],t:"pw",note:"LN normalize 独立成 kernel(reduction 输出物化后逐点归一)。"},
+   {m:["mmqkv"],t:"ext",note:"cuBLAS extern;Inductor 不生成代码 = 融合屏障。bias 由 cublasLt 内部处理(不是 Inductor 融合)。"},
+   {m:["views"],t:"view",note:"split/transpose 是 view,零 kernel,只改 stride。"},
+   {m:["bmm1"],t:"ext",note:"extern 屏障。"},
+   {m:["scale","softmax"],t:"red",note:"scale(pw 生产者)融进 softmax 的 persistent reduction:max→exp→sum→div + 前置 scale 单 kernel 完成。"},
+   {m:["drop1"],t:"pw",note:"philox 在 kernel 内生成 mask(无单独 bernoulli kernel);消费它的是 extern bmm → 只能独立成 kernel。"},
+   {m:["bmm2"],t:"ext",note:"extern 屏障。"},
+   {m:["mmproj"],t:"ext",note:"cuBLAS extern。"},
+   {m:["drop2","add2","lnBs"],t:"red",note:"dropout→residual add→LN stats 三级链全部融进 reduction。"},
+   {m:["lnBn"],t:"pw",note:"LN normalize。"},
+   {m:["mmfc1"],t:"ext",note:"extern;因此 gelu/dropout 无法挂 epilogue。"},
+   {m:["gelu","drop3"],t:"pw",note:"gelu+dropout 点链融合(philox RNG in-kernel)。"},
+   {m:["mmfc2"],t:"ext",note:"extern。"},
+   {m:["drop4","add3","lnCs"],t:"red",note:"dropout→residual→LN stats 融进 reduction。"},
+   {m:["lnCn"],t:"pw",note:"LN normalize。"}]},
+ max:{name:"+ max_autotune(模板 epilogue/prologue)",note:"GEMM 换成 Triton/CUTLASS 模板后出现 epilogue(读输出的点算)与 prologue(输入一元单使用者)槽位:bias/gelu/dropout/scale 全部折进 GEMM;候选与 ATen 同台实测,谁快用谁。",
+  groups:[
+   {m:["add1","lnAs"],t:"red",note:"同默认模式。"},
+   {m:["lnAn"],t:"pw"},
+   {m:["mmqkv"],t:"tpl",note:"Triton 模板 GEMM + bias epilogue;与 cuBLAS extern 实测竞争后胜出才被采用。"},
+   {m:["views"],t:"view"},
+   {m:["bmm1","scale"],t:"tpl",note:"bmm 模板 + ×1/√d epilogue → scale kernel 消失。"},
+   {m:["softmax"],t:"red",note:"persistent reduction(此处 scale 已进上游 epilogue)。"},
+   {m:["bmm2","drop1"],t:"tpl",note:"bmm 模板 + dropout① prologue:dropout 是模板输入的一元、单使用者函数,融进 load 端。"},
+   {m:["mmproj","drop2"],t:"tpl",note:"模板 + dropout② epilogue。"},
+   {m:["add2","lnBs"],t:"red",note:"residual add 需整块读另一条支路的 h(额外 load);此处保守展示为独立 reduction,随后 add 与 LN② stats 融进 reduction。"},
+   {m:["lnBn"],t:"pw"},
+   {m:["mmfc1","gelu","drop3"],t:"tpl",note:"fc1 模板 + gelu + dropout③ 两级 epilogue(均只读一次输出)。"},
+   {m:["mmfc2","drop4"],t:"tpl",note:"fc2 模板 + dropout④ epilogue。"},
+   {m:["add3","lnCs"],t:"red",note:"residual add + LN③ stats。"},
+   {m:["lnCn"],t:"pw"}]}
+};
+const KPALETTE=["#4f8ef7","#9b59d0","#0f9d58","#e8a200","#6a7bd8","#00897b","#c2185b","#ef6c00","#2e7d32","#5f6ac4","#d93025","#795548"];
+function topoMode(m){
+  document.querySelectorAll("#s6 .btn.seg").forEach(b=>b.classList.remove("on"));
+  const btn={eager:"mEager",default:"mDefault",max:"mMax"}[m];$(btn).classList.add("on");
+  const mode=MODES[m];
+  const colorOf={};
+  mode.groups.forEach((g,gi)=>{
+    g.color=KPALETTE[gi%KPALETTE.length];
+    g.m.forEach(nid=>colorOf[nid]={color:g.color,gi,k:g.k,t:g.t});
+  });
+  let s="";
+  /* 列标题 */
+  ["残差 + LN① + QKV + Attention 主体","Proj + LN② + fc1","fc2 + LN③"].forEach((t,i)=>{
+    s+=`<text x="${COL_X[i]+NODE_W/2}" y="26" text-anchor="middle" font-size="13" font-weight="700" fill="#5a6472">${t}</text>`;
+  });
+  NODES.forEach(n=>{
+    const x=COL_X[n.c],y=TOP+n.r*ROW_H;
+    const c=colorOf[n.id];
+    const isView=n.k==="view";
+    const fill=c?c.color+"26":"#eef1f5";
+    const stroke=c?c.color:"#b8bec7";
+    const dash=isView?' stroke-dasharray="5 4"':"";
+    s+=`<g class="node" data-id="${n.id}"><rect x="${x}" y="${y}" width="${NODE_W}" height="${NODE_H}" rx="8" fill="${fill}" stroke="${stroke}" stroke-width="1.6"${dash}/>`;
+    s+=`<text x="${x+10}" y="${y+17}" font-size="11.5" fill="#1d2330" font-weight="600">${n.t}</text>`;
+    const sub=c?`K${c.gi+1} · ${c.k?c.k:(TYPE_NAME[c.t]||c.t)}`:(isView?"无 kernel":` · ${TYPE_NAME[n.k]||n.k}`);
+    s+=`<text x="${x+10}" y="${y+33}" font-size="10" fill="#5a6472">${n.dec?'<tspan fill="#9b59d0">decomposed</tspan> ':''}${isView?'<tspan>'+sub+'</tspan>':sub}</text>`;
+    if(c&&!isView)s+=`<text x="${x+NODE_W-8}" y="${y+17}" text-anchor="end" font-size="10" font-weight="700" fill="${c.color}">K${c.gi+1}</text></g>`;
+    else s+=`</g>`;
+    if(n.r< (function(){const col=NODES.filter(q=>q.c===n.c);return col[col.length-1].r})()){
+      s+=`<line x1="${x+NODE_W/2}" y1="${y+NODE_H}" x2="${x+NODE_W/2}" y2="${y+ROW_H-2}" stroke="#c3c9d3" marker-end="url(#arr)"/>`;
+    }
+  });
+  /* 列间连接箭头 */
+  for(let ci=0;ci<2;ci++){
+    const colNodes=NODES.filter(q=>q.c===ci),last=colNodes[colNodes.length-1];
+    const next=NODES.filter(q=>q.c===ci+1)[0];
+    const x1=COL_X[ci]+NODE_W, y1=TOP+last.r*ROW_H+NODE_H/2;
+    const x2=COL_X[ci+1], y2=TOP+next.r*ROW_H+NODE_H/2;
+    s+=`<path d="M ${x1} ${y1} C ${x1+34} ${y1}, ${x2-34} ${y2}, ${x2-6} ${y2}" fill="none" stroke="#c3c9d3" stroke-width="1.6" marker-end="url(#arr)"/>`;
+  }
+  $("topoSvg").innerHTML=s;
+  document.querySelectorAll(".node").forEach(el=>{
+    el.onclick=()=>showGroupNote(el.dataset.id,colorOf,mode);
+  });
+  const nK=mode.groups.filter(g=>g.t!=="view").length;
+  $("topoCnt").innerHTML=`ATen 调用约 23 个 → <b>${nK}</b> 个 kernel launch(${mode.name})`;
+  $("topoNote").textContent=mode.note;
+  $("kernelList").innerHTML=mode.groups.map((g,gi)=>({g,gi})).filter(({g})=>g.t!=="view").map(({g,gi})=>{
+    const col=g.color;
+    const names=g.m.map(id=>NODES.find(n=>n.id===id).t.split(" ")[0]).join(" + ");
+    return `<div class="krow" style="border-color:${col}"><b style="color:${col}">K${gi+1}</b> <span class="tag" style="background:${col}">${TYPE_NAME[g.t]||g.t}</span> ${names}${g.k?` <span class="hint">(${g.k})</span>`:""}${g.note?`<br><span class="hint">${g.note}</span>`:""}</div>`;
+  }).join("");
+  showGroupNote(null,colorOf,mode);
+}
+function showGroupNote(nid,colorOf,mode){
+  const g=nid?colorOf[nid]:null;
+  if(!g){$("topoNote").textContent=nid?"view 操作不产生 kernel,只施加 layout 约束;冲突时会阻止融合(\"node1 and node2 uses different buf layouts\")。":mode.note;return;}
+  const grp=mode.groups[g.gi];
+  $("topoNote").innerHTML=`<b>K${g.gi+1}(${TYPE_NAME[grp.t]||grp.t})</b> — ${grp.note||"同一 fused kernel 内的节点,循环体合并执行,中间结果不出寄存器。"}`;
+}
+$("mEager").onclick=()=>topoMode("eager");
+$("mDefault").onclick=()=>topoMode("default");
+$("mMax").onclick=()=>topoMode("max");
+topoMode("default");
+
+/* ============ 7 配置表 ============ */
+const CFGS=[
+ ["aggressive_fusion","False","共享数据为 0 也允许横向融合(非 reduction)"],
+ ["score_fusion_memory_threshold","10(字节)","横向融合要求的最低共享数据量"],
+ ["max_fusion_size","64","单个 fused node 的调度图 node 数上限"],
+ ["loop_ordering_after_fusion","True","融合后重排循环顺序,提高可融合性"],
+ ["benchmark_template_fusion","True","模板+epilogue 组合在调度期实测(fused vs unfused)"],
+ ["max_template_fusion_benchmarked_choices","1","参与融合实测的模板候选数"],
+ ["benchmark_fusion","False(env 开)","通用纵向融合逐对实测"],
+ ["combo_kernels","False","无关 kernel 装箱合并执行(横向融合的彻底形态,见 4.3)"],
+ ["benchmark_combo_kernel","False","combo kernel 逐组实测合并是否更快;<0.3ms 小 kernel 直接融"],
+ ["combo_kernel_max_num_nodes","8","单个 combo kernel 的子 kernel 数上限"],
+ ["prologue_fusion","True(OSS)","模板 prologue 融合(输入端一元单使用者)"],
+ ["persistent_reductions","True","小 reduction 用 persistent 形式,softmax 整链 1 kernel"],
+ ["max_autotune_gemm","False","GEMM 走 Triton/CUTLASS 模板并与 ATen 实测竞争"],
+ ["coordinate_descent_tuning","False(env 开)","tile 逐维爬山细搜,编译时间大涨"],
+ ["autotune_cudagraph_benchmarking","False(env 开)","autotune 改用 cudagraph replay 计时,剔除 host 下发"],
+ ["fallback_random","False","关闭 philox 融合 RNG,RNG 走 eager"],
+ ["cpp_wrapper","False","wrapper 生成 C++,大幅降低单 kernel 下发开销"],
+];
+$("cfgTable").innerHTML="<tr><th>配置</th><th>默认值</th><th>作用</th></tr>"+CFGS.map(c=>`<tr><td class="mono">${c[0]}</td><td class="mono">${c[1]}</td><td>${c[2]}</td></tr>`).join("");
+
+/* scrollspy */
+const secs=[...document.querySelectorAll("section[id],header")];
+window.addEventListener("scroll",()=>{
+  const y=window.scrollY+80;let cur="";
+  document.querySelectorAll("nav a").forEach(a=>{if($(a.getAttribute("href").slice(1))&&$(a.getAttribute("href").slice(1)).offsetTop<=y)cur=a.getAttribute("href");});
+  document.querySelectorAll("nav a").forEach(a=>a.classList.toggle("on",a.getAttribute("href")===cur));
+},{passive:true});
+</script>
+</body>
+</html>
