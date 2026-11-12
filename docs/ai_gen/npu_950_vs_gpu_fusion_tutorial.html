@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>昇腾 950 vs GPU:TorchInductor 融合比例与性能差异根因(交互式讲解)</title>
+<style>
+  :root{
+    --accent:#ee4c2c; --accent2:#f96854; --ink:#1d2330; --sub:#5a6472;
+    --line:#e3e7ee; --bg:#f7f8fa; --card:#ffffff;
+    --hw:#2f7dd1; --sw:#0f9d58; --mix:#e8a200;
+    --ok:#0f9d58; --warn:#e8a200; --no:#d93025;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"PingFang SC","Microsoft YaHei",system-ui,-apple-system,sans-serif;color:var(--ink);background:var(--bg);line-height:1.65}
+  code,.mono{font-family:"SF Mono",Menlo,Consolas,monospace;font-size:.92em;background:#eef1f5;border-radius:4px;padding:1px 5px}
+  a{color:var(--accent)}
+  .wrap{max-width:1100px;margin:0 auto;padding:0 20px}
+
+  nav{position:sticky;top:0;z-index:50;background:#ffffffee;backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+  nav .wrap{display:flex;gap:4px;align-items:center;overflow-x:auto;padding:8px 20px}
+  nav a{white-space:nowrap;text-decoration:none;color:var(--sub);font-size:13.5px;padding:6px 12px;border-radius:18px}
+  nav a:hover{background:#f1f3f6;color:var(--ink)}
+  nav a.on{background:var(--accent);color:#fff}
+  .brand{font-weight:700;color:var(--ink);margin-right:10px;white-space:nowrap}
+
+  header{background:linear-gradient(135deg,#2b1408,#4a2010 55%,#7a3016);color:#fff;padding:56px 0 46px}
+  header h1{margin:0 0 10px;font-size:32px;letter-spacing:.5px}
+  header p{color:#ffd9cd;margin:4px 0;max-width:840px}
+  .stats{display:flex;gap:14px;flex-wrap:wrap;margin-top:26px}
+  .stat{background:#ffffff14;border:1px solid #ffffff2c;border-radius:12px;padding:12px 18px;min-width:150px}
+  .stat b{display:block;font-size:24px;color:#ffb49e}
+  .stat span{font-size:12.5px;color:#ffd9cd}
+
+  section{padding:46px 0 10px}
+  h2{font-size:25px;margin:0 0 6px;border-left:5px solid var(--accent);padding-left:12px}
+  h2 small{color:var(--sub);font-weight:400;font-size:14px;margin-left:10px}
+  h3{font-size:18px;margin:26px 0 8px}
+  .lead{color:var(--sub);margin:2px 0 18px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px 20px;margin:14px 0}
+  .callout{border-radius:12px;padding:14px 18px;margin:14px 0;font-size:14px}
+  .callout.gold{background:#fff8e6;border:1px solid #f0dfa8}
+  .callout.blue{background:#eef4ff;border:1px solid #cfdefc}
+  .callout.green{background:#e9f7ee;border:1px solid #bfe8cd}
+  .callout .t{font-weight:700;margin-bottom:4px}
+  table{border-collapse:collapse;width:100%;font-size:13.5px;background:#fff}
+  th,td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}
+  th{background:#f2f4f7;white-space:nowrap}
+  .src{font-size:12px;color:var(--sub)}
+  .src code{background:#f2f4f7}
+  ul.pts{margin:8px 0;padding-left:20px;font-size:13.5px}
+  ul.pts li{margin:3px 0}
+  .pill{display:inline-block;border-radius:14px;padding:2px 10px;font-size:12px;font-weight:600}
+  .pill.sw{background:#e2f5ea;color:#0b7a45}
+  .pill.hw{background:#e4eefb;color:#1d5ea8}
+  .pill.mix{background:#fbf0d7;color:#9a6b00}
+  .pill.ok{background:#e2f5ea;color:var(--ok)} .pill.warn{background:#fbf0d7;color:#9a6b00} .pill.no{background:#fbe3e0;color:var(--no)}
+
+  /* stepper */
+  .steps{display:flex;flex-wrap:wrap;gap:0;align-items:stretch;margin:10px 0}
+  .step{flex:1;min-width:130px;border:1.5px solid var(--line);background:#fff;border-radius:10px;padding:10px 12px;cursor:pointer;position:relative;margin-right:26px;transition:all .2s}
+  .step:last-child{margin-right:0}
+  .step:after{content:"▶";position:absolute;right:-22px;top:50%;transform:translateY(-50%);color:#c3c9d3;font-size:11px}
+  .step:last-child:after{content:""}
+  .step .n{font-size:11px;color:var(--accent);font-weight:700}
+  .step .t{font-weight:700;font-size:14px;margin:2px 0}
+  .step .s{font-size:11.5px;color:var(--sub)}
+  .step.on{border-color:var(--accent);box-shadow:0 4px 14px #ee4c2c22;background:#fff8f6}
+  #gateDetail{min-height:120px}
+  #gateDetail h4{margin:2px 0 8px;font-size:16px}
+
+  /* code path compare */
+  .lanes{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:760px){.lanes{grid-template-columns:1fr}}
+  .lane{border-radius:12px;padding:14px 16px;font-size:13.5px}
+  .lane.gpu{background:#eef4ff;border:1.5px solid #cfdefc}
+  .lane.npu{background:#fdf0ec;border:1.5px solid #f5cabb}
+  .lane b.tt{display:block;margin-bottom:8px;font-size:15px}
+  .lane .node{display:block;background:#ffffff9c;border:1px solid #ffffffdd;border-radius:8px;padding:6px 10px;margin:5px 0}
+  .lane .node.same{outline:2px dashed #b9c6da;outline-offset:-2px}
+  .lane .node.bad{border-color:#e8b3a6;background:#fff}
+  .lane .note{font-size:12px;color:var(--sub);margin-top:8px}
+
+  /* op cards */
+  .opgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(215px,1fr));gap:10px;margin:12px 0}
+  .op{border:1.5px solid var(--line);background:#fff;border-radius:10px;padding:10px 12px;cursor:pointer;transition:all .15s}
+  .op:hover{border-color:#c9cfda}
+  .op.on{border-color:var(--accent);background:#fff8f6}
+  .op b{font-size:14px} .op .ex{font-size:12px;color:var(--sub)}
+  #opDetail{min-height:110px}
+
+  /* switches */
+  .swrow{display:flex;align-items:center;gap:10px;padding:9px 12px;border:1px solid var(--line);border-radius:10px;margin:7px 0;background:#fff}
+  .swrow input{width:18px;height:18px;accent-color:var(--accent)}
+  .swrow .nm{font-weight:600;font-size:13.5px}
+  .swrow .ds{font-size:12px;color:var(--sub)}
+  .soc{display:flex;gap:8px;margin:10px 0}
+  #epStatus{padding:14px 16px;border-radius:12px;font-size:14px;margin-top:10px}
+  #epStatus.closed{background:#fbe3e0;border:1px solid #f3b6ac}
+  #epStatus.partial{background:#fbf0d7;border:1px solid #f0dfa8}
+  #epStatus.open{background:#e2f5ea;border:1px solid #bfe8cd}
+
+  /* calculator */
+  .calc{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  @media(max-width:760px){.calc{grid-template-columns:1fr}}
+  .calc label{font-size:13px;color:var(--sub)}
+  .calc input[type=range]{width:100%}
+  select{font-size:13.5px;padding:4px 8px;border-radius:8px;border:1px solid var(--line)}
+  .big{font-size:22px;font-weight:700;color:var(--accent)}
+  .mid{font-size:16px;font-weight:700;color:var(--ink)}
+  .subout{background:#f2f4f7;border-radius:10px;padding:10px 14px;margin:8px 0;font-size:13.5px}
+  .formula{font-size:12px;color:var(--sub);background:#f7f8fa;border-radius:8px;padding:8px 10px;margin-top:8px}
+
+  /* distance demo */
+  .dist{margin:12px 0}
+  .distbar{position:relative;height:56px;border-radius:10px;overflow:hidden;display:flex}
+  .distbar .seg{height:100%;display:flex;align-items:center;justify-content:center;color:#fff;font-size:12.5px;font-weight:600}
+  .cursorline{position:absolute;top:0;bottom:0;width:3px;background:var(--ink);transition:left .15s}
+  .cursorline:after{content:"你在这里";position:absolute;top:-22px;left:-30px;font-size:11px;color:var(--ink);white-space:nowrap}
+
+  /* matrix filter */
+  .chips{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}
+  .chip{border:1.5px solid var(--line);background:#fff;border-radius:18px;padding:5px 14px;font-size:13px;cursor:pointer;font-weight:600;color:var(--sub)}
+  .chip.on{background:var(--accent);border-color:var(--accent);color:#fff}
+  #matrix tr.hide{display:none}
+
+  .btn{border:none;cursor:pointer;background:var(--accent);color:#fff;font-size:14px;padding:8px 18px;border-radius:8px;font-weight:600}
+  .btn:hover{background:var(--accent2)}
+  .btn.ghost{background:#fff;color:var(--accent);border:1.5px solid var(--accent)}
+
+  footer{margin-top:50px;padding:26px 0 40px;border-top:1px solid var(--line);font-size:12.5px;color:var(--sub)}
+</style>
+</head>
+<body>
+
+<nav><div class="wrap">
+  <span class="brand">950 vs GPU 融合根因</span>
+  <a href="#s1">同源前提</a>
+  <a href="#s2">根因链</a>
+  <a href="#s3">软件维度</a>
+  <a href="#s4">硬件维度</a>
+  <a href="#s5">性能维度</a>
+  <a href="#s6">归因矩阵</a>
+  <a href="#s7">诊断方法</a>
+</div></nav>
+
+<header><div class="wrap">
+  <h1>昇腾 950(A5)vs GPU:TorchInductor 融合差异根因</h1>
+  <p>基线:torch_npu 2.10.0 的 <code>is_ascend950</code> 实现分支(triton-ascend 路径),对照上游 GPU Triton 路径。基于代码逐行分析,每个结论标注出处。</p>
+  <p><b>核心结论:融合比例差距的第一性根因在软件(fallback 覆盖面 + epilogue 开关);硬件边界(UB / cube-vector 分离 / 无跨核规约)构成补齐软件后仍存在的底。</b></p>
+  <div class="stats">
+    <div class="stat"><b>≈750-766</b><span>强制 fallback 的 op 重载(逐出融合池)</span></div>
+    <div class="stat"><b>4 层</b><span>GEMM epilogue 开关(全部默认关,仅 {add, relu})</span></div>
+    <div class="stat"><b>256 KB</b><span>A5 每核 UB 上限(GPU 中间值住 256KB 寄存器)</span></div>
+    <div class="stat"><b>64 → 20</b><span>A5 长距离水平融合阈值(防大 kernel 运行时错误)</span></div>
+  </div>
+</div></header>
+
+<!-- ================= 1 同源前提 ================= -->
+<section id="s1"><div class="wrap">
+  <h2>1. 同源前提:融合"判定"逻辑与 GPU 是同一套<small>所以判定不是瓶颈</small></h2>
+  <p class="lead">NPU 走 triton-ascend,上游 <code>Scheduler.fuse_nodes → can_fuse</code> 主循环原样生效;NPU 用 monkeypatch + 后端注册接入。差异产生在节点<b>进入融合池之前</b>(fallback 逐出)与融合<b>编译验证阶段</b>(UB/线性化/spill 否决)。</p>
+
+  <div class="lanes">
+    <div class="lane gpu">
+      <b class="tt">GPU 路径</b>
+      <span class="node same">FX 图 → 分解(gelu/LN/softmax → pointwise 链)</span>
+      <span class="node same">Triton lowering(逐元素算子近乎全覆盖)</span>
+      <span class="node same">Scheduler.can_fuse(垂直/水平/模板 epilogue)</span>
+      <span class="node">编译:几乎必然成功,没有"融合前证明编译得过"的门槛</span>
+      <span class="node">大融合 kernel(中间值住寄存器)</span>
+      <div class="note">融合边际成本 ≈ 几条指令 → "能 fuse 就 fuse"</div>
+    </div>
+    <div class="lane npu">
+      <b class="tt">A5 路径</b>
+      <span class="node same">FX 图 → 分解(部分删除:gelu 默认不分解)</span>
+      <span class="node bad">lowering:约 750 op 被 fallback 清单强制逐出 → aclnn 单算子 + 强制上游物化</span>
+      <span class="node same">Scheduler.can_fuse(同源 + 5 条保守 patch)</span>
+      <span class="node bad">编译可行性门:UB 溢出 / 索引线性化 / spill → 拒绝或拆分</span>
+      <span class="node bad">kernel(UB 驻留预算,或拆分 / 回退)</span>
+      <div class="note">融合边际成本 = UB 里多驻留一份 tile → "先证明放得下,再融合"</div>
+    </div>
+  </div>
+
+  <div class="callout blue"><div class="t">接入方式(4 层 patch)</div>
+    类方法 monkeypatch(<code>scheduler.py:222-1015</code>:fuse_nodes_once / speedup_by_fusion / are_long_distant_nodes)、
+    <code>V.choices</code>(<code>choices.py:67-94</code> Welford 旁路)、后端 <code>NPUCombinedScheduling</code>(<code>npu_combined_scheduling.py:59-70</code>)、可选 trace/DVM/MFusion(默认关)。
+  </div>
+</div></section>
+
+<!-- ================= 2 根因链 ================= -->
+<section id="s2"><div class="wrap">
+  <h2>2. 全景根因链:节点从 FX 图到 kernel 的六道关卡<small>点击查看每关细节</small></h2>
+  <div class="steps" id="gateSteps">
+    <div class="step" data-i="0"><div class="n">关卡 1</div><div class="t">分解关</div><div class="s">gelu/LN 等不再拆成点链</div></div>
+    <div class="step" data-i="1"><div class="n">关卡 2</div><div class="t">lowering 关</div><div class="s">≈750 op 强制 fallback</div></div>
+    <div class="step" data-i="2"><div class="n">关卡 3</div><div class="t">融合判定关</div><div class="s">与 GPU 同源(非差异源)</div></div>
+    <div class="step" data-i="3"><div class="n">关卡 4</div><div class="t">编译可行性关</div><div class="s">UB / 线性化 / spill</div></div>
+    <div class="step" data-i="4"><div class="n">关卡 5</div><div class="t">模板 epilogue 关</div><div class="s">固定 tile + UB 验证</div></div>
+    <div class="step" data-i="5"><div class="n">关卡 6</div><div class="t">调度距离关</div><div class="s">64 → 20</div></div>
+  </div>
+  <div class="card" id="gateDetail"></div>
+</div></section>
+
+<!-- ================= 3 软件维度 ================= -->
+<section id="s3"><div class="wrap">
+  <h2>3. 软件维度<small>比例差距的第一性根因</small></h2>
+
+  <h3>3.1 fallback 覆盖面:哪些算子被逐出了融合池?</h3>
+  <p class="lead">GPU 上原生 Triton lower、正常参与融合的算子,A5 上被 <code>lowering_fallback_list.py</code>(头注释:"will not be allowed to lowering and fusion")强制转 aclnn 单算子。<b>点击下方卡片看逐类对比。</b></p>
+  <div class="opgrid" id="opCards"></div>
+  <div class="card" id="opDetail"></div>
+
+  <div class="callout gold"><div class="t">三重伤害机制(每个 fallback 节点)</div>
+    <ul class="pts">
+      <li><b>不可融合</b>:ExternKernelSchedulerNode,调度到它时上游强制 <code>flush()</code>,前后融合组不能跨越;</li>
+      <li><b>强制物化</b>:<code>npu_make_fallback</code> 无条件 <code>add_needs_realized_inputs</code>(<code>lowering.py:103</code>)→ 上游生产者物化、layout 冻结、零拷贝内联失效;</li>
+      <li><b>锚点缺位</b>:自有 override 仅 19 个 op;cat(非 A5 全 fallback)、LayerNorm(A5 默认 fallback,因 Welford 默认关)、gelu(默认不分解)恰好是 GPU transformer 融合的锚点。</li>
+    </ul>
+  </div>
+
+  <h3>3.2 GEMM epilogue 模拟器:四层开关 + SOC 决定通道状态</h3>
+  <p class="lead">catlass 是 A5 唯一 GEMM 模板 epilogue 通道。切换开关观察通道状态——即使全开,白名单也只有 <code>{add, relu}</code> 单节点。</p>
+  <div class="soc">
+    <button class="btn seg on" id="soc950">Ascend 950(A5)</button>
+    <button class="btn seg" id="soc910">Ascend 910B(对照)</button>
+  </div>
+  <div id="switchBox">
+    <label class="swrow"><input type="checkbox" id="sw1"><span><span class="nm">TORCHINDUCTOR_MAX_AUTOTUNE=1</span><br><span class="ds">所有 GEMM 模板 + epilogue 融合的总闸门(默认 0)</span></span></label>
+    <label class="swrow"><input type="checkbox" id="sw2"><span><span class="nm">MAX_AUTOTUNE_GEMM_BACKENDS 含 CATLASS</span><br><span class="ds">默认 "ATEN,TRITON,CPP",不含 CATLASS</span></span></label>
+    <label class="swrow"><input type="checkbox" id="sw3"><span><span class="nm">CATLASS_EPILOGUE_FUSION=1</span><br><span class="ds">config.py:225-227,默认 0</span></span></label>
+    <label class="swrow"><input type="checkbox" id="sw4"><span><span class="nm">catlass 库可导入</span><br><span class="ds">TORCHINDUCTOR_NPU_CATLASS_DIR 指向可用库</span></span></label>
+  </div>
+  <div id="epStatus" class="closed"></div>
+
+  <h3>3.3 调度器保守化 patch(默认生效)</h3>
+  <table>
+    <tr><th>patch</th><th>上游行为</th><th>A5 行为</th><th>出处</th></tr>
+    <tr><td>固定 tile 模板编译可行性门</td><td>benchmark 关闭时模板 epilogue 无条件融合</td><td>追加 epilogue 后完整编译一遍,UB/编译不过即拒绝(<code>npu_template_compile_reject</code>)</td><td class="src"><code>scheduler.py:406-431, 834-876</code></td></tr>
+    <tr><td>长距离水平融合阈值</td><td>proximity &gt; 64 拒绝</td><td><b>&gt; 20 拒绝</b>("avoiding runtime errors in large kernels")</td><td class="src"><code>scheduler.py:223-235</code></td></tr>
+    <tr><td>模板融合白名单</td><td>任意 template 放行</td><td>仅 <code>TritonTemplateBuffer</code>;CATLASS/dkdv/DVM 走窄通道</td><td class="src"><code>codegen/scheduling.py:1148-1157</code></td></tr>
+    <tr><td>spill 判死阈值</td><td>benchmark 中 n_spills &gt; 8 判 inf</td><td><b>n_spills &gt; 0 即 inf</b></td><td class="src"><code>codegen/scheduling.py:983-987</code></td></tr>
+    <tr><td>nolinear 重分组二次校验</td><td>(无)</td><td>拆不开即静默判 inf</td><td class="src"><code>npu_combined_scheduling.py:214-235</code></td></tr>
+  </table>
+  <p class="src">注:上游参考为 2.16.0a0,torch_npu 基于 2.10——reduction-reduction 判定简化等个别差异可能是版本漂移,定责前需在 2.10 checkout 复核;上表五条为 torch_npu 明确新增。</p>
+</div></section>
+
+<!-- ================= 4 硬件维度 ================= -->
+<section id="s4"><div class="wrap">
+  <h2>4. 硬件维度(A5 芯片边界)<small>补齐软件后仍追不平的部分</small></h2>
+
+  <h3>4.1 四条硬件根因:GPU 怎么做 vs A5 怎么做</h3>
+  <table>
+    <tr><th>硬件根因</th><th>GPU</th><th>A5</th><th>融合层面的后果</th><th>判别式</th></tr>
+    <tr><td><b>H1 UB 工作集上限</b><br><span class="src"><code>config.py:38-40</code>、<code>triton_heuristics.py:1031-1140</code></span></td><td>中间值住寄存器(256KB/SM),融合只加寄存器压力</td><td>所有中间 tile 驻留 UB(256KB/核),还要扣 multibuffer 槽位/workspace/DMA;编译器硬检查 <code>ub overflow</code></td><td>融合加深 → 溢出 → 缩 tile(循环加深)或拒绝;combo 无合法共享 tiling 整个放弃</td><td>融合决策已做出、<b>编译阶段被否</b></td></tr>
+    <tr><td><b>H2 cube/vector 分离</b><br><span class="src">CV 流水 hint、catlass 白名单</span></td><td>GEMM 与 epilogue 同一指令流、同一 SM,表达平凡</td><td>GEMM 在 cube(经 L0C)、pointwise 在 vector,epilogue = 跨单元两级流水(mix 模式)</td><td>epilogue 只敢开 <code>{add, relu}</code> 白名单、禁链式、EVG 算子集封闭——每扩一个算子都要人工验证流水</td><td>白名单之外<b>根本不表达</b></td></tr>
+    <tr><td><b>H3 无跨核规约合并</b><br><span class="src"><code>split_tiling.py:260-278</code></span></td><td>split reduction:多 block 部分和 + 原子加/二次归约</td><td>"grid&gt;1 with no cross-core combine (A5)" → 动态 full reduction 只能单核;静态走多层拆分+中间物化</td><td>规约锚点(softmax/LN)要么单核串行、要么拆组</td><td>能融但<b>只能单核</b></td></tr>
+    <tr><td><b>H4 无随机 gather/scatter</b><br><span class="src"><code>ir.py:1708-1769</code></span></td><td>每线程任意寻址,index 类天然融进 pointwise</td><td>间接寻址 → SIMT_ONLY(标量核,tile ≤ 8KB)或特殊指令;A5 用 NDDMA + simd_simt_mix 缓解(模板仅 11 op)</td><td>embedding/gather 融合收益骤降;线性化失败降级或拆 kernel</td><td>融合了但<b>降到标量路径</b></td></tr>
+  </table>
+  <ul class="pts">
+    <li><b>H5 指令缺口与大 kernel 上限</b>:fp32 向量弱(upcast 占双倍 UB)、fp64/welford_combine/scan-in-masked 不支持;大融合 kernel 运行时错误 → 长距离阈值收到 20。</li>
+    <li><b>P1 L2 192MB</b>:融合的核心收益(省 DRAM 往返)被稀释——不减融合次数,但降低"少融合"的代价,也解释了 NPU 侧 benchmark 必须 L2 flush。</li>
+  </ul>
+
+  <h3>4.2 UB tile 预算计算器<small>公式来自 tile_generator.py:137-142</small></h3>
+  <div class="calc">
+    <div>
+      <label>kernel 类型</label><br>
+      <select id="ubKernel"><option value="simd">SIMD(vector 核,UB=256KB)</option><option value="simt">SIMT(标量核,local=128KB,tile 驻留 ≤ 8KB)</option></select>
+      <p></p>
+      <label>输入指针数:<b id="ptrVal">4</b></label>
+      <input type="range" id="ptrNum" min="1" max="8" value="4">
+      <p></p>
+      <label>dtype</label><br>
+      <select id="ubDtype"><option value="2">fp16 / bf16(2 字节)</option><option value="4">fp32(4 字节)</option></select>
+      <div class="formula">
+        A5: <code>max_numel = local_mem // min(ptr, 3) // dtype_bytes</code>;预算内还要扣 multibuffer 槽位(veccore=3/crosscore=2)、workspace(=4)与 DMA staging。<br>
+        SIMT: <code>total_numel × dtype &gt; 8KB 的 tile 配置直接拒绝</code>
+      </div>
+    </div>
+    <div>
+      <div class="subout">A5 每 program tile numel 上限:<span class="big" id="ubOut">-</span></div>
+      <div class="subout">单指针 UB 均摊:<span class="mid" id="ubPer">-</span></div>
+      <div class="subout">GPU 对照:逐元素融合中间值住寄存器(256KB/SM),shared memory 只做显式 staging——<b>没有这个预算门</b>,融合边际成本≈几条指令。</div>
+      <div class="subout" id="ubNote">-</div>
+    </div>
+  </div>
+
+  <h3>4.3 长距离融合阈值演示(64 → 20)</h3>
+  <p class="lead">两个节点在调度序中的距离(proximity score)多大时还允许水平融合?拖动滑块。</p>
+  <div class="dist card">
+    <input type="range" id="distSlider" min="0" max="80" value="40" style="width:100%">
+    <div class="distbar">
+      <div class="seg" style="width:25%;background:#0f9d58">两者都融合 (0-20)</div>
+      <div class="seg" style="width:55%;background:#e8a200">仅 GPU 融合 (20-64)</div>
+      <div class="seg" style="width:20%;background:#9aa2ad">都不融合 (&gt;64)</div>
+      <div class="cursorline" id="distCursor" style="left:50%"></div>
+    </div>
+    <div id="distMsg" style="font-size:13.5px;margin-top:10px"></div>
+    <div class="src">出处:scheduler.py:223-235(A5 阈值 20,注释 "GPU default score is 64, A5 use 20 to avoiding runtime errors in large kernels");消费点 choices.py:770-775("Nodes are too far away")。</div>
+  </div>
+</div></section>
+
+<!-- ================= 5 性能维度 ================= -->
+<section id="s5"><div class="wrap">
+  <h2>5. 融合性能维度<small>比例之外:融合了也不一定像 GPU 那样赚</small></h2>
+
+  <div class="lanes">
+    <div class="lane gpu">
+      <b class="tt">GPU:融合几乎单调有益</b>
+      <span class="node">省 kernel launch + 省 DRAM 往返</span>
+      <span class="node">中间值住寄存器,融合加深几乎免费</span>
+      <span class="node">规约可铺满整机(split reduction)</span>
+      <div class="note">收益公式:省掉的 DRAM 往返 &gt; 0 → 融合</div>
+    </div>
+    <div class="lane npu">
+      <b class="tt">A5:三要素全部弱于 GPU 同构融合</b>
+      <span class="node bad">并行度:tile 搜索被核数钳制(wave 量化 0.72);规约单核(H3)</span>
+      <span class="node bad">驻留与流水:tile 驻留小 → 循环深;multibuffer 深度受 UB 限制</span>
+      <span class="node bad">跨单元协调:含 GEMM 的融合走 CV 流水,有调度/同步开销</span>
+      <div class="note">且 L2 192MB 稀释"省 DRAM"收益;大 kernel 还有运行时错误风险</div>
+    </div>
+  </div>
+
+  <h3>决策质量:默认不实测融合收益</h3>
+  <ul class="pts">
+    <li><code>benchmark_fusion</code> 默认关(与上游一致):大多数 pointwise/reduction 融合<b>不实测收益</b>,赌启发式正确;A5 仅对固定 tile 模板 epilogue 做编译验证。</li>
+    <li>开启 benchmark 时,A5 用 profiler 批测 + L2 flush(<code>scheduler.py:37-219</code>;批次 TOTAL_STEP=10,注释写 50 与实现不一致)替代事件计时——计时口径系统性不同于 GPU。</li>
+    <li>判死更严:spill&gt;0 即 inf(上游 &gt;8)、nolinear 拆不开静默 inf——宁可错杀,压比例也改变"哪些融合活下来"的分布。</li>
+  </ul>
+</div></section>
+
+<!-- ================= 6 归因矩阵 ================= -->
+<section id="s6"><div class="wrap">
+  <h2>6. 归因矩阵<small>点击筛选</small></h2>
+  <div class="chips" id="chips">
+    <span class="chip on" data-f="all">全部</span>
+    <span class="chip" data-f="sw">软件</span>
+    <span class="chip" data-f="hw">硬件</span>
+    <span class="chip" data-f="mix">混合</span>
+    <span class="chip" data-f="ratio">主要影响比例</span>
+    <span class="chip" data-f="perf">主要影响性能</span>
+  </div>
+  <table id="matrix">
+    <tr><th>机制</th><th>属性</th><th>出处</th><th>比例</th><th>性能</th><th>默认状态</th></tr>
+    <tr data-a="sw" data-i="ratio"><td>约 750 op 强制 fallback + 强制物化</td><td><span class="pill sw">软件</span></td><td class="src"><code>lowering_fallback_list.py</code>、<code>lowering.py:103</code></td><td>★★★★★</td><td>★★</td><td>生效</td></tr>
+    <tr data-a="sw" data-i="ratio"><td>view/expand 逐出融合(transformer reshape 密集伤害)</td><td><span class="pill sw">软件</span></td><td class="src"><code>lowering_fallback_list.py:191-224</code></td><td>★★★★</td><td>★★</td><td>生效</td></tr>
+    <tr data-a="sw" data-i="both"><td>LN / cat / gelu 锚点缺位</td><td><span class="pill sw">软件</span></td><td class="src"><code>lowering.py:1190/:1284</code>、<code>decomposition.py</code></td><td>★★★★</td><td>★★★</td><td>生效(A5 LN 默认 fallback)</td></tr>
+    <tr data-a="mix" data-i="ratio"><td>GEMM epilogue 白名单 + 四层开关</td><td><span class="pill mix">软件 gating × 芯片分档</span></td><td class="src"><code>config.py:225-227</code>、<code>gemm_template.py:840-898</code></td><td>★★★★</td><td>★★★</td><td>默认关</td></tr>
+    <tr data-a="sw" data-i="both"><td>mm+mm 移除 / 非 A5 addmm 拆分</td><td><span class="pill sw">软件</span></td><td class="src"><code>post_grad.py:8-29</code>、<code>dvm/config.py:31</code></td><td>★★</td><td>★★</td><td>生效</td></tr>
+    <tr data-a="mix" data-i="ratio"><td>编译可行性门(模板 epilogue 超 UB 拒绝)</td><td><span class="pill mix">软件门 × 硬件因</span></td><td class="src"><code>scheduler.py:406-431</code></td><td>★★★</td><td>★★</td><td>生效</td></tr>
+    <tr data-a="mix" data-i="ratio"><td>长距离阈值 64 → 20</td><td><span class="pill mix">软件阈值 × 硬件因</span></td><td class="src"><code>scheduler.py:223-235</code></td><td>★★</td><td>★</td><td>A5 生效</td></tr>
+    <tr data-a="sw" data-i="both"><td>spill&gt;0 判死 / nolinear 拆不开静默 inf</td><td><span class="pill sw">软件</span></td><td class="src"><code>scheduling.py:983-987</code>、<code>npu_combined_scheduling.py:229-231</code></td><td>★★</td><td>★★</td><td>生效</td></tr>
+    <tr data-a="hw" data-i="perf"><td>UB 工作集上限 + 编译器硬检查</td><td><span class="pill hw">硬件</span></td><td class="src"><code>config.py:38-40</code>、<code>triton_heuristics.py:1031-1140</code></td><td>★★</td><td>★★★★</td><td>物理边界</td></tr>
+    <tr data-a="hw" data-i="perf"><td>无跨核规约合并(动态 full reduction 单核)</td><td><span class="pill hw">硬件</span></td><td class="src"><code>split_tiling.py:260-278</code></td><td>★★</td><td>★★★★</td><td>物理边界</td></tr>
+    <tr data-a="hw" data-i="both"><td>cube/vector 分离(epilogue 跨单元表达受限)</td><td><span class="pill hw">硬件</span></td><td class="src">CV 流水 hint、catlass 白名单</td><td>★★★</td><td>★★★</td><td>架构</td></tr>
+    <tr data-a="hw" data-i="perf"><td>向量核无随机 gather/scatter</td><td><span class="pill hw">硬件(A5 缓解)</span></td><td class="src"><code>ir.py:1708-1769</code></td><td>★★</td><td>★★★</td><td>物理边界</td></tr>
+    <tr data-a="hw" data-i="both"><td>指令缺口(fp64 / welford / scan)</td><td><span class="pill hw">硬件</span></td><td class="src"><code>triton.py:298/:2218/:5210</code></td><td>★★</td><td>★★</td><td>物理边界</td></tr>
+    <tr data-a="hw" data-i="perf"><td>大 kernel 运行时上限(阈值 20 的来源)</td><td><span class="pill hw">硬件</span></td><td class="src"><code>scheduler.py:231</code></td><td>★★</td><td>★</td><td>物理边界</td></tr>
+    <tr data-a="hw" data-i="perf"><td>L2 192MB 使融合收益稀释</td><td><span class="pill hw">硬件特征</span></td><td class="src"><code>scheduler.py:149</code></td><td>—</td><td>★★</td><td>物理特征</td></tr>
+  </table>
+</div></section>
+
+<!-- ================= 7 诊断方法 ================= -->
+<section id="s7"><div class="wrap">
+  <h2>7. 定量诊断:三桶归因法<small>① : ②③ 的量级 ≈ 软件 : 硬件</small></h2>
+  <div class="card">
+    <ul class="pts">
+      <li><b>桶① 不在融合池(纯软件)</b>:统计 wrapper 输出中 aclnn 调用数 / 总节点数,即 fallback/extern 占比。边界对照:<code>NPU_INDUCTOR_FALLBACK_LIST=allfallback</code>(全 fallback,融合归零)。</li>
+      <li><b>桶② scheduler 拒绝(软件 patch 为主)</b>:<code>TORCH_LOGS="+inductor"</code> 收集 WhyNoFuse 原因分布("Nodes are too far away"、"not TritonTemplateBuffer"、spill 等)。</li>
+      <li><b>桶③ 编译拒绝(硬件诱发)</b>:<code>counters["inductor"]["npu_template_compile_reject"]</code>、ub overflow 日志、<code>NoTritonConfigsError</code>、combo 放弃日志、nolinear 拆分计数。</li>
+    </ul>
+  </div>
+  <h3>单变量实验矩阵(每项只动一个开关)</h3>
+  <table>
+    <tr><th>实验</th><th>验证的假设</th></tr>
+    <tr><td>开 <code>CATLASS_EPILOGUE_FUSION</code> + max-autotune</td><td>GEMM epilogue 对比例的贡献</td></tr>
+    <tr><td>开 <code>TORCHINDUCTOR_ENABLE_WELFORD</code></td><td>LN 锚点缺位的贡献</td></tr>
+    <tr><td><code>ENABLE_INPLACE_BUFFERS=0</code></td><td>启用 NPU-IR multi-buffer 的收益</td></tr>
+    <tr><td>从 fallback 清单移除 view 族</td><td>view 障碍的贡献(transformer 场景)</td></tr>
+    <tr><td><code>TORCHINDUCTOR_BENCHMARK_FUSION=1</code></td><td>决策质量(启发式错杀)的贡献</td></tr>
+  </table>
+
+  <div class="callout green"><div class="t">优化方向(按预期 ROI,均属软件层)</div>
+    补 lowering 覆盖(超越函数/in-place/prims 先行,<b>优先恢复 view 零成本语义</b>)→ 打通 LN/Welford 锚点 → cat 走 pointwise_cat → 放宽确定性判死(spill 对齐 8)→ 硬件补偿改进(UB 重试多轮化、combo 多 dispatch 轴、动态规约双 kernel 方案)。
+  </div>
+</div></section>
+
+<footer><div class="wrap">
+  本页面与配套文档 <code>npu_950_vs_gpu_fusion_root_cause.md</code> 由 AI 助手生成,基于 torch_npu 2.10.0 仓代码分析(2026-11-12),行号对应分析时工作区状态;星标为定性估计而非实测,定量方法见第 7 节。
+</div></footer>
+
+<script>
+/* ---------- gate stepper ---------- */
+const GATES = [
+  {t:"分解关:op 不再拆成点链", b:`GPU 上 gelu/LN/softmax/erf 被 Inductor 分解成 pointwise 链,进入融合池参与大 kernel。A5 上 <code>decomposition.py:178-200</code> 删除一批分解:gelu 默认不分解(仅 TORCHINDUCTOR_ENABLE_FAST_GELU=1 时注册 tanh 分解)、nll_loss、log_softmax_backward、repeat_interleave 等;MLIR/DVM 路径再排除 30 个。整体算子失去可融合性。
+  <br><br><b>GPU 形态:</b>gelu → mul/exp/sigmoid 小算子 → 融入 pointwise。<br><b>A5 形态:</b>gelu 整体一个 aclnn op(或专用模板),与邻域不融合。`, s:"software"},
+  {t:"lowering 关:约 750 op 强制逐出融合池", b:`<code>lowering_fallback_list.py</code> 默认约 750-766 个 op 重载强制 fallback 为 aclnn 单算子(含超越函数/in-place/scan/pooling/<b>view</b>/index-scatter/RNG/量化)。每个 fallback:① 不可融合(ExternKernelSchedulerNode,调度到它强制 flush);② 无条件 <code>add_needs_realized_inputs</code>(<code>lowering.py:103</code>)→ 上游强制物化、layout 冻结;③ NPU 自有 override 仅 19 op。
+  <br><br><b>这是比例差距的最大头。</b>详见第 3 节卡片。`, s:"software"},
+  {t:"融合判定关:与 GPU 同源(非差异来源)", b:`上游 <code>Scheduler.fuse_nodes → can_fuse</code> 主循环原样生效:NPU 通过 4 层 patch 接入(monkeypatch / V.choices / NPUCombinedScheduling / 可选 trace-DVM-MFusion),融合合法性判定逻辑与 GPU 同一套。
+  <br><br>叠加的 NPU 保守 patch(编译可行性门、长距离 20、模板白名单、spill&gt;0、nolinear 静默 inf)计入关卡 4/6 与第 3.3 节。<b>所以"scheduler 判不判得出"不是差异来源。</b>`, s:"same"},
+  {t:"编译可行性关:UB / 线性化 / spill", b:`融合决策做出后,A5 还要过编译验证:① <b>UB 溢出</b>:triton-ascend 硬检查 <code>ub overflow requires X bits while Y bits available</code>(<code>triton_heuristics.py:1031-1048</code>)→ 缩 tile 重试一次(留 20% 余量)→ 全败则 NoTritonConfigsError 回退;② <b>索引线性化失败</b>(<code>can_split_all</code>,<code>ir.py:1562-1583</code>):A5 降级 SIMT(tile ≤ 8KB);③ <b>spill</b>:n_spills&gt;0 即判 inf(上游 &gt;8)。
+  <br><br><b>GPU 上不存在此关卡:融合决策做出后编译几乎必然成功。</b>`, s:"hw"},
+  {t:"模板 epilogue 关:固定 tile + UB 验证", b:`GEMM 模板选中后 tile 固定;追加 epilogue 可能使 UB 超限(<code>scheduler.py:406-416</code> 注释自述),故即使不开 benchmark 也强制编译验证,失败拒绝融合并打点 <code>npu_template_compile_reject</code>。catlass 通道本身被四层默认关的开关门控,白名单仅 <code>{add, relu}</code> 单节点。
+  <br><br><b>GPU:Triton 模板 epilogue 接受任意 pointwise 链,无此验证环节。</b>可在 3.2 节模拟开关状态。`, s:"hw"},
+  {t:"调度距离关:64 → 20", b:`A5 上 <code>are_long_distant_nodes</code> 阈值从 64 收紧到 20(scheduler.py:223-235,注释:"GPU default score is 64, A5 use 20 to avoiding runtime errors in large kernels")——大融合 kernel 在 A5 有运行时错误风险,这是硬件规模上限的软件表现。距离 20-64 的生产者-消费者对在 GPU 会水平融合,A5 不融合。4.3 节可交互演示。`, s:"hw"},
+];
+const gateDetail = document.getElementById('gateDetail');
+function showGate(i){
+  document.querySelectorAll('#gateSteps .step').forEach((el,j)=>el.classList.toggle('on', j===i));
+  const g = GATES[i];
+  const pill = g.s==='software' ? '<span class="pill sw">软件</span>' : g.s==='hw' ? '<span class="pill hw">硬件/软件门×硬件因</span>' : '<span class="pill ok">同源</span>';
+  gateDetail.innerHTML = `<h4>${g.t} ${pill}</h4><div style="font-size:13.5px">${g.b}</div>`;
+}
+document.querySelectorAll('#gateSteps .step').forEach(el=>el.addEventListener('click',()=>showGate(+el.dataset.i)));
+showGate(1);
+
+/* ---------- fallback op cards ---------- */
+const OPS = [
+  {n:"超越函数族", ex:"asin / erfc / expm1 / lgamma / fmod ...", gpu:"register_pointwise_numeric 原生 Triton lower,正常融入 pointwise 大 kernel(上游 lowering.py:8654-8932)", npu:"强制 fallback → aclnn 单算子;整条逐元素链被切断"},
+  {n:"view / expand 族", ex:"aten.view / view.dtype / _unsafe_view / expand_as", gpu:"零成本 IR:alias/detach/view 直通,不产生代码", npu:"变成真实调度节点 + 融合屏障:pw→view→pw 切成 2 kernel + 1 次 aclnn;transformer reshape 密集伤害最大"},
+  {n:"in-place 族", ex:"add_ / mul_ / relu_ / sigmoid_ / fill_ ...", gpu:"原生 lower,可与生产者/消费者融合", npu:"fallback;叠加 scatter/mutation 的 realize 屏障(lowering.py:737/:883)"},
+  {n:"scan 族", ex:"cummax / cummin / cumprod / logcumsumexp", gpu:"SCAN backend feature,融合进 reduction kernel", npu:"fallback;且 split-scan 与 reduction 融合被禁(scheduling.py:1096-1101)"},
+  {n:"index / scatter 族", ex:"index_select / scatter / index_put / gather", gpu:"任意寻址天然融进 pointwise", npu:"间接寻址 → SIMT_ONLY 或特殊指令;线性化失败拆 kernel;A2/A3 整类 fallback(仅 A5 有 mix 模式)"},
+  {n:"RNG", ex:"rand / randn / randperm", gpu:"Philox 算子融合进 kernel 内部生成", npu:"fallback → 单独 aclnn 调用"},
+  {n:"pooling", ex:"avg_pool3d / max_pool2d_with_indices(+bwd)", gpu:"原生 lower + 分解参与融合", npu:"fallback;950 上 max_pool2d_with_indices 保持整体(decomposition.py)"},
+  {n:"LayerNorm(锚点)", ex:"native_layer_norm", gpu:"分解成 pointwise+reduction 链,是 transformer 融合的锚点", npu:"A5+fp16/bf16 默认直接 fallback(lowering.py:1284-1294,因 enable_welford 默认关);Welford/多层拆分能力弱于 GPU"},
+];
+const opDetail = document.getElementById('opDetail');
+function showOp(i){
+  document.querySelectorAll('#opCards .op').forEach((el,j)=>el.classList.toggle('on', j===i));
+  const o = OPS[i];
+  opDetail.innerHTML = `<b style="font-size:15px">${o.n}</b> <span class="ex" style="color:var(--sub);font-size:12px">${o.ex}</span>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:10px">
+      <div style="background:#eef4ff;border-radius:10px;padding:10px 12px;font-size:13px"><b>GPU</b><br>${o.gpu}</div>
+      <div style="background:#fdf0ec;border-radius:10px;padding:10px 12px;font-size:13px"><b>A5</b><br>${o.npu}</div>
+    </div>`;
+}
+const opCards = document.getElementById('opCards');
+OPS.forEach((o,i)=>{
+  const d=document.createElement('div'); d.className='op'; d.innerHTML=`<b>${o.n}</b><br><span class="ex">${o.ex}</span>`;
+  d.addEventListener('click',()=>showOp(i)); opCards.appendChild(d);
+});
+showOp(1);
+
+/* ---------- epilogue switches ---------- */
+let soc='950';
+const epStatus=document.getElementById('epStatus');
+function updEp(){
+  const on = ['sw1','sw2','sw3','sw4'].map(id=>document.getElementById(id).checked);
+  const cnt = on.filter(Boolean).length;
+  if(soc==='910'){
+    epStatus.className='closed';
+    epStatus.innerHTML=`<b>通道不存在(910B)</b>:catlass 仅支持 Ascend 950DT/950PR。910 上 GEMM epilogue 融合为<b>零</b>;且 <code>disable_addmm_fusion = not is_ascend950</code>(dvm/config.py:31)——连 mm+add(bias) 都拆开;fx_passes 还主动移除 mm+mm 融合 pattern。`;
+    return;
+  }
+  if(cnt===4){
+    epStatus.className='open';
+    epStatus.innerHTML=`<b>通道打开,但表达面仍远窄于 GPU</b>:fast 路径白名单仅 <code>{add, relu}</code>、最多一次、仅 1 个 epilogue 节点、bias 须 1 维连续、禁链式(<code>assert len(existing_epilogue_nodes)==0</code>)、禁 reduction、水平融合恒 False;EVG 支持 mul/div/sub/sigmoid,其余(tanh/ge/bf16+旧模板)NotImplementedError。<br><b>GPU 对照:Triton 模板 epilogue 接受任意 pointwise 链 + prologue fusion。</b>`;
+  } else {
+    epStatus.className='closed';
+    const miss = ['max_autotune','GEMM_BACKENDS 含 CATLASS','CATLASS_EPILOGUE_FUSION','catlass 库'].filter((_,i)=>!on[i]);
+    epStatus.innerHTML=`<b>通道关闭</b>(缺:${miss.join(' / ')})。开箱即用时 GEMM epilogue 融合为 0 条路径生效——GEMM 周边的 pointwise 各自成 kernel。这就是 transformer 负载融合比例差距的大头之一。已开 ${cnt}/4。`;
+  }
+}
+['sw1','sw2','sw3','sw4'].forEach(id=>document.getElementById(id).addEventListener('change',updEp));
+document.getElementById('soc950').addEventListener('click',e=>{soc='950';setSoc(e.target);updEp();});
+document.getElementById('soc910').addEventListener('click',e=>{soc='910';setSoc(e.target);updEp();});
+function setSoc(btn){document.querySelectorAll('.soc .btn').forEach(b=>b.classList.remove('on'));btn.classList.add('on');}
+updEp();
+
+/* ---------- UB calculator ---------- */
+function updUb(){
+  const k=document.getElementById('ubKernel').value;
+  const ptr=+document.getElementById('ptrNum').value;
+  const db=+document.getElementById('ubDtype').value;
+  document.getElementById('ptrVal').textContent=ptr;
+  let maxNumel, perKB, note;
+  if(k==='simd'){
+    const eff=Math.min(ptr,3);
+    const local=256*1024;
+    maxNumel=Math.floor(local/eff/db);
+    perKB=(local/eff/1024).toFixed(0);
+    note=`SIMD 路径:输入指针 ${ptr} 个,A5 按 <b>min(ptr, 3) 封顶 3</b>(软件近似)均摊;再扣 multibuffer/workspace/DMA 后实际更小。fp32 时预算减半。`;
+    if(ptr>3) note+=`<br>⚠ 超过 3 个输入指针不再进一步摊薄——大融合 kernel 的 UB 压力被软件模型低估。`;
+  } else {
+    maxNumel=Math.floor(8*1024/db);
+    perKB=(128*1024/1024).toFixed(0);
+    note=`SIMT 路径:tile 总驻留 &gt; 8KB 的配置直接拒绝(tile_generator.py:316-318);128KB local memory 仅作 staging。标量核吞吐本身也远低于 vector。`;
+  }
+  document.getElementById('ubOut').textContent=maxNumel.toLocaleString()+' 元素';
+  document.getElementById('ubPer').textContent=perKB+' KB / 指针 × '+ptr+' 指针';
+  document.getElementById('ubNote').innerHTML=note;
+}
+['ubKernel','ptrNum','ubDtype'].forEach(id=>document.getElementById(id).addEventListener('input',updUb));
+updUb();
+
+/* ---------- distance demo ---------- */
+function updDist(){
+  const d=+document.getElementById('distSlider').value;
+  document.getElementById('distCursor').style.left=(d/80*100)+'%';
+  const gpu=d<=64, a5=d<=20;
+  document.getElementById('distMsg').innerHTML=
+    `距离 <b>${d}</b>:GPU ${gpu?'<span class="pill ok">融合</span>':'<span class="pill no">不融合</span>'} ·
+    A5 ${a5?'<span class="pill ok">融合</span>':'<span class="pill no">不融合</span>'}`+
+    (!gpu&&!a5?'':(gpu&&!a5?` —— <b style="color:#9a6b00">GPU 会融合、A5 不会</b>(阈值 64→20,防大 kernel 运行时错误)`:''));
+}
+document.getElementById('distSlider').addEventListener('input',updDist);
+updDist();
+
+/* ---------- matrix filter ---------- */
+let f='all';
+document.querySelectorAll('#chips .chip').forEach(c=>c.addEventListener('click',()=>{
+  f=c.dataset.f;
+  document.querySelectorAll('#chips .chip').forEach(x=>x.classList.toggle('on',x===c));
+  document.querySelectorAll('#matrix tr[data-a]').forEach(tr=>{
+    const show = f==='all' || tr.dataset.a===f || tr.dataset.i===f;
+    tr.classList.toggle('hide',!show);
+  });
+}));
+</script>
+</body>
+</html>
