@@ -13,7 +13,7 @@
 
 一句话结论:
 
-- **比例差异的第一性根因在软件**:约 750-766 个 op 重载被 fallback 清单强制逐出融合池,每个 fallback 节点还强制上游物化、冻结 layout;GEMM epilogue 融合通道被 4 层默认关闭的开关门控,白名单仅 `{add, relu}`。
+- **比例差异的第一性根因在软件**:约 750-766 个 op 重载被 fallback 清单强制逐出融合池,每个 fallback 节点还强制上游物化、冻结 layout;GEMM epilogue 融合有两条通道——Triton 模板(triton CV 融合)与 catlass EVG(白名单仅 `{add, relu}`)——默认全部关闭。
 - **即使把软件层全部补齐,A5 靠芯片仍有一段追不平的差距**,集中在五条硬件边界:UB 工作集上限(而非寄存器)、cube/vector 分离、无跨核规约合并、向量核无随机 gather/scatter、指令集缺口与大 kernel 上限。
 - **性能差异**主要来自:融合 kernel 在 A5 上的并行度/驻留/流水三要素全部弱于 GPU 同构融合;且 A5 的 192MB L2 使"省 DRAM 往返"这一融合核心收益被稀释;默认配置下不做融合前 benchmark,决策质量依赖启发式。
 
@@ -103,9 +103,13 @@ A5 :   FX图 → 分解(部分删除)   → lowering(766 fallback强制逐出) �
 
 **布局约束插拷贝**:`require_contiguous` 在 bmm(`kernel/bmm.py:1769-1797`)、flex_attention(`kernel/flex_attention.py:1764-1769/:2898`)、searchsorted(`lowering.py:338-341`)处对非连续输入插入独立 copy kernel,打断可融合链。
 
-### 3.2 GEMM epilogue 融合:通道存在但被四层默认关闭的开关门控
+### 3.2 GEMM epilogue 融合:两条通道并存,默认全部关闭
 
-catlass(对标 CUTLASS)是 A5 唯一 GEMM 模板 epilogue 通道,注册于 mm/addmm/bmm/grouped_mm(`kernel/mm.py:2171/:2473`、`kernel/bmm.py:1832`、`kernel/mm_grouped.py:238`)。
+NPU 的 GEMM 模板 epilogue 有两条通道:
+
+**通道一:Triton 模板(triton CV 融合)**。`kernel/mm.py:78-90` 注释明示 "(for CV / epilogue fusion)":三族 NPU 自研 Triton GEMM 模板——`npu_triton_mm_template`(标准分块)、`npu_persistent_mm_template`(persistent 对角分核)、`npu_resident_b_mm_template`(B 驻留 L0B;mm.py:2193/:2215/:2248 注入 choices)——以 `acc += tl.dot(...)`(:159 等 6 处)表达 GEMM,tile 由 `optimize_tiling` 按 UB 预算生成、program 数封顶 `NUM_CUBE_CORES`(mm.py:1256-1261)。scheduler 检测 mm 输出被 pointwise 消费时,把消费链渲染进模板的 `{{store_output}}` 位置(:297 "inductor generates epilogue suffix");addmm bias 经 `addmm_epilogue`(prefix_args=1,mm.py:1343-1397),broadcast 负载(bias[N])另有去 broadcast 优化(select_algorithm.py:1061-1065)。triton-ascend 把 `tl.dot` 编译为 cube 单元 MMA(L0A/L0B→L0C),pointwise 编译为 vector 单元——**同一 kernel 内 cube+vector 混合执行,中间结果留 L0/UB 不出 HBM**,这就是 "CV(Cube/Vector)融合" 的含义。门控 `use_triton_template`(`utils.py:69-91`):`max_autotune` + TRITON autotune backend + TRITON_TEMPLATES feature——同样漏查 `max_autotune_gemm`(与 catlass 同一门控缺陷)。接受任意可 lowering 的 pointwise 链(无白名单),但追加 epilogue 放大 UB 工作集,受 3.3 #1 编译可行性门约束。
+
+**通道二:catlass EVG**,注册于 mm/addmm/bmm/grouped_mm(`kernel/mm.py:2171/:2473`、`kernel/bmm.py:1832`、`kernel/mm_grouped.py:238`)。
 
 **启用需要同时满足(全部默认不满足)**:
 
@@ -116,15 +120,15 @@ catlass(对标 CUTLASS)是 A5 唯一 GEMM 模板 epilogue 通道,注册于 mm/ad
 | `CATLASS_EPILOGUE_FUSION=1` | `config.py:225-227` | 0 |
 | catlass 库可导入(`TORCHINDUCTOR_NPU_CATLASS_DIR`) | `config.py:206-213` | 需安装 |
 
-SOC 限制:仅 Ascend 950DT/950PR(docs/feature/catlass);**非 A5 的 SOC 上 GEMM epilogue 融合为零**,且非 A5 `disable_addmm_fusion = not is_ascend950`(`dvm/config.py:31`)连 mm+add(bias) 都拆开;`fx_passes/post_grad.py:8-29` 主动移除社区 mm+mm 融合 pattern。
+SOC 限制:catlass 仅 Ascend 950DT/950PR(docs/feature/catlass);Triton 模板通道无 SOC 门槛(模板参数考虑 910B CUBE 硬件限制,mm.py:1509-1511),**但两条通道默认都关**。非 A5 `disable_addmm_fusion = not is_ascend950`(`dvm/config.py:31`)连 mm+add(bias) 都拆开;`fx_passes/post_grad.py:8-29` 主动移除社区 mm+mm 融合 pattern。
 
-**即使全部打开,表达面仍远窄于 GPU**:
+**即使全部打开,catlass 通道表达面仍远窄于 GPU**:
 
 - fast/on-fly 融合(`codegen/catlass/gemm_template.py:840-898`):算子白名单**仅 `{add, relu}`**(:857),最多一次(:860),**仅 1 个 epilogue 节点**(:842-844),bias 须 1 维连续(:869-874),且模板需 `is_support_relu`(:510)。
 - EVG(Epilogue Visitor Graph)融合(`catlass_python_evg.py:59-88`):支持 mul/truediv/add/sub/relu/sigmoid/cast/constant;`ge`/`tanh` 等显式 `NotImplementedError`;`fusion_type!=2` 的模板不支持 bf16(`catlass_scheduling.py:360-368`)。
 - 调度侧(`catlass_scheduling.py:265-369`):仅 Pointwise `ComputedBuffer`;**禁链式 epilogue**(:287-289 `assert len(existing_epilogue_nodes)==0`);禁 reduction(:326-328);禁 aliasing/mutation(:323);**水平融合恒 False**(:102-111)。
 
-**对照 GPU**:Triton 模板 epilogue 接受任意 pointwise 链(任意 tl 表达式)且支持 prologue fusion。手工兜底(fused_matmul_relu/grouped_matmul/grad-transpose/multi-slice-cat 四个 FX pass、mfusion MLIR)全部默认关、严格 pattern、逐个验证。
+**对照 GPU**:GPU Triton 模板 epilogue 同样接受任意 pointwise 链(任意 tl 表达式)且支持 prologue fusion;NPU 的 Triton 模板通道表达面与 GPU 同级,**差距不在表达面而在三点:(a) 默认关(max_autotune)——(b) UB 门可能拒绝 epilogue 扩展——(c) catlass 侧白名单窄**。手工兜底(fused_matmul_relu/grouped_matmul/grad-transpose/multi-slice-cat 四个 FX pass、mfusion MLIR)全部默认关、严格 pattern、逐个验证。
 
 ### 3.3 调度器保守化 patch(默认生效的主干)
 
@@ -164,7 +168,7 @@ SOC 限制:仅 Ascend 950DT/950PR(docs/feature/catlass);**非 A5 的 SOC 上 GEM
 ### 4.2 H2:Cube/Vector 分离,GEMM epilogue 跨单元边界
 
 - **GPU**:GEMM 与 epilogue 是同一条指令流、同一个 SM——Triton 里 MMA 写完接着写 pointwise,表达平凡;epilogue 融合接受任意 pointwise 链。
-- **A5**:GEMM 在 cube 单元(数据经 L0C),pointwise/reduction 在 vector 单元。epilogue 融合 = 一个 kernel 内调度 cube+vector 两级流水(mix 模式;`tile_mix_cube_loop`/`tile_mix_vector_loop`/`enable_dynamic_cv_pipeline` 等 compile hint 就是流水参数,`config.py:473-533`)。跨单元融合的表达复杂度是结构性的——catlass 白名单仅 `{add, relu}`、EVG 算子集封闭、禁链式,**每多支持一个算子都要人工验证流水正确性**。
+- **A5**:GEMM 在 cube 单元(数据经 L0C),pointwise/reduction 在 vector 单元。epilogue 融合 = 一个 kernel 内调度 cube+vector 两级流水(mix 模式;`tile_mix_cube_loop`/`tile_mix_vector_loop`/`enable_dynamic_cv_pipeline` 等 compile hint 就是流水参数,`config.py:473-533`)。跨单元边界的主要软件补偿正是 3.2 通道一:triton CV 融合把 GEMM 与 pointwise 编进同一 kernel、由 triton-ascend 做 cube+vector 混合流水;catlass 侧则保守得多——白名单仅 `{add, relu}`、EVG 算子集封闭、禁链式,**每多支持一个算子都要人工验证流水正确性**。
 - 核数模型也分离:`num_cube_core`/`num_vector_core` 从 device properties 读取且比例固定(`config.py:43-116`),分核限核(`NPU_DEVICE_LIMIT`)按两族分别约束。
 
 **对 transformer 负载,这是影响最大的单条芯片因素(GEMM 密集,epilogue 是融合大头)。**
@@ -223,7 +227,7 @@ GPU 上融合几乎单调有益(省 launch + 省 DRAM);A5 上大融合 kernel �
 | 约 750 op 强制 fallback + 强制物化 | `lowering_fallback_list.py`、`lowering.py:103` | 软件 | ★★★★★ | ★★ | 生效 |
 | view/expand 逐出融合 | `lowering_fallback_list.py:191-224` | 软件 | ★★★★ | ★★ | 生效 |
 | LN/cat/gelu 锚点缺位 | `lowering.py:1190/:1284`、`decomposition.py` | 软件 | ★★★★ | ★★★ | 生效(A5 LN 默认 fallback) |
-| GEMM epilogue 白名单+四层开关 | `config.py:225-227`、`gemm_template.py:840-898` | 软件 gating(芯片分档) | ★★★★ | ★★★ | 默认关 |
+| GEMM epilogue 双通道默认关(catlass 白名单 {add, relu};Triton 模板受 UB 门) | `kernel/mm.py:78-90`、`config.py:225-227`、`gemm_template.py:840-898` | 软件 gating(芯片分档) | ★★★★ | ★★★ | 默认关 |
 | mm+mm 移除 / 非 A5 addmm 拆分 | `post_grad.py:8-29`、`dvm/config.py:31` | 软件 | ★★ | ★★ | 生效 |
 | 编译可行性门(UB) | `scheduler.py:406-431` | 软件门 × 硬件因 | ★★★ | ★★ | 生效 |
 | 长距离阈值 64→20 | `scheduler.py:223-235` | 软件阈值 × 硬件因 | ★★ | ★ | A5 生效 |
@@ -256,8 +260,9 @@ GPU 上融合几乎单调有益(省 launch + 省 DRAM);A5 上大融合 kernel �
 2. **打通 LN/Welford 锚点**:A5 上默认启用 `TORCHINDUCTOR_ENABLE_WELFORD` 并验证 LayerNormV4 fallback 条件,让 LN 重新进融合池。
 3. **cat 走 pointwise_cat**:A5 上 `force_pointwise_cat`(≤8 输入)替代 ConcatKernel extern。
 4. **放宽确定性判死**:spill 阈值对齐上游(8);nolinear 拆不开时降级 benchmark 而非静默 inf。
-5. **默认开启无风险的编译可行性门结果缓存**:模板 epilogue 编译验证结果按 kernel 签名缓存,减少重复编译开销,让 gating 更敢开。
-6. **硬件补偿改进**(吃掉 H 层差距):UB 重试策略多轮化、combo 共享 tiling 搜索扩到多 dispatch 轴、间接访存 simt_template 模板扩面、动态规约双 kernel + 部分和方案(模拟 GPU split reduction)。
+5. **打通 GEMM epilogue 双通道**:修 `use_triton_template`/`use_catlass_template` 漏查 `max_autotune_gemm` 的门控缺陷;开 max-autotune 后实测 Triton CV 通道的 UB 拒绝率(3.3 #1 门),若拒绝率高则优化 epilogue 的 tile 预算策略。
+6. **默认开启无风险的编译可行性门结果缓存**:模板 epilogue 编译验证结果按 kernel 签名缓存,减少重复编译开销,让 gating 更敢开。
+7. **硬件补偿改进**(吃掉 H 层差距):UB 重试策略多轮化、combo 共享 tiling 搜索扩到多 dispatch 轴、间接访存 simt_template 模板扩面、动态规约双 kernel + 部分和方案(模拟 GPU split reduction)。
 
 ---
 

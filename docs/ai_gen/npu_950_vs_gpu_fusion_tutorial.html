@@ -150,7 +150,7 @@
   <p><b>核心结论:融合比例差距的第一性根因在软件(fallback 覆盖面 + epilogue 开关);硬件边界(UB / cube-vector 分离 / 无跨核规约)构成补齐软件后仍存在的底。</b></p>
   <div class="stats">
     <div class="stat"><b>≈750-766</b><span>强制 fallback 的 op 重载(逐出融合池)</span></div>
-    <div class="stat"><b>4 层</b><span>GEMM epilogue 开关(全部默认关,仅 {add, relu})</span></div>
+    <div class="stat"><b>2 条</b><span>GEMM epilogue 通道(Triton 模板 CV 融合 + catlass EVG),默认全部关</span></div>
     <div class="stat"><b>256 KB</b><span>A5 每核 UB 上限(GPU 中间值住 256KB 寄存器)</span></div>
     <div class="stat"><b>64 → 20</b><span>A5 长距离水平融合阈值(防大 kernel 运行时错误)</span></div>
   </div>
@@ -219,14 +219,14 @@
     </ul>
   </div>
 
-  <h3>3.2 GEMM epilogue 模拟器:四层开关 + SOC 决定通道状态</h3>
-  <p class="lead">catlass 是 A5 唯一 GEMM 模板 epilogue 通道。切换开关观察通道状态——即使全开,白名单也只有 <code>{add, relu}</code> 单节点。</p>
+  <h3>3.2 GEMM epilogue 模拟器:双通道 + 四层开关</h3>
+  <p class="lead">A5 的 GEMM 模板 epilogue 有<b>两条通道</b>:① <b>Triton 模板(triton CV 融合)</b>——三族自研 GEMM 模板(<code>tl.dot</code>→Cube、pointwise→Vector)把消费它的 pointwise 链经 <code>&#123;&#123;store_output&#125;&#125;</code> 编进<b>同一 kernel</b>,无算子白名单;② <b>catlass EVG</b>——图级 Epilogue Visitor Graph,白名单仅 <code>{add, relu}</code> 单节点。两条通道默认<b>全部关闭</b>:通道① 门控 max_autotune + TRITON backend;通道② 另需下面四层开关。下方模拟通道② 的开关状态。</p>
   <div class="soc">
     <button class="btn seg on" id="soc950">Ascend 950(A5)</button>
     <button class="btn seg" id="soc910">Ascend 910B(对照)</button>
   </div>
   <div id="switchBox">
-    <label class="swrow"><input type="checkbox" id="sw1"><span><span class="nm">TORCHINDUCTOR_MAX_AUTOTUNE=1</span><br><span class="ds">所有 GEMM 模板 + epilogue 融合的总闸门(默认 0)</span></span></label>
+    <label class="swrow"><input type="checkbox" id="sw1"><span><span class="nm">TORCHINDUCTOR_MAX_AUTOTUNE=1</span><br><span class="ds">两条通道共用的总闸门(默认 0)——打开后 Triton CV 模板通道即进入候选</span></span></label>
     <label class="swrow"><input type="checkbox" id="sw2"><span><span class="nm">MAX_AUTOTUNE_GEMM_BACKENDS 含 CATLASS</span><br><span class="ds">默认 "ATEN,TRITON,CPP",不含 CATLASS</span></span></label>
     <label class="swrow"><input type="checkbox" id="sw3"><span><span class="nm">CATLASS_EPILOGUE_FUSION=1</span><br><span class="ds">config.py:225-227,默认 0</span></span></label>
     <label class="swrow"><input type="checkbox" id="sw4"><span><span class="nm">catlass 库可导入</span><br><span class="ds">TORCHINDUCTOR_NPU_CATLASS_DIR 指向可用库</span></span></label>
@@ -253,7 +253,7 @@
   <table>
     <tr><th>硬件根因</th><th>GPU</th><th>A5</th><th>融合层面的后果</th><th>判别式</th></tr>
     <tr><td><b>H1 UB 工作集上限</b><br><span class="src"><code>config.py:38-40</code>、<code>triton_heuristics.py:1031-1140</code></span></td><td>中间值住寄存器(256KB/SM),融合只加寄存器压力</td><td>所有中间 tile 驻留 UB(256KB/核),还要扣 multibuffer 槽位/workspace/DMA;编译器硬检查 <code>ub overflow</code></td><td>融合加深 → 溢出 → 缩 tile(循环加深)或拒绝;combo 无合法共享 tiling 整个放弃</td><td>融合决策已做出、<b>编译阶段被否</b></td></tr>
-    <tr><td><b>H2 cube/vector 分离</b><br><span class="src">CV 流水 hint、catlass 白名单</span></td><td>GEMM 与 epilogue 同一指令流、同一 SM,表达平凡</td><td>GEMM 在 cube(经 L0C)、pointwise 在 vector,epilogue = 跨单元两级流水(mix 模式)</td><td>epilogue 只敢开 <code>{add, relu}</code> 白名单、禁链式、EVG 算子集封闭——每扩一个算子都要人工验证流水</td><td>白名单之外<b>根本不表达</b></td></tr>
+    <tr><td><b>H2 cube/vector 分离</b><br><span class="src">CV 流水 hint、catlass 白名单</span></td><td>GEMM 与 epilogue 同一指令流、同一 SM,表达平凡</td><td>GEMM 在 cube(经 L0C)、pointwise 在 vector,epilogue = 跨单元两级流水(mix 模式)</td><td>软件补偿是 Triton CV 融合通道(<code>tl.dot</code>+pointwise 同 kernel,混合流水);catlass 侧只敢开 <code>{add, relu}</code> 白名单、禁链式、EVG 算子集封闭——每扩一个算子都要人工验证流水,且通道默认全关、受 UB 门</td><td>跨单元流水<b>表达与验证成本结构性高于 GPU</b></td></tr>
     <tr><td><b>H3 无跨核规约合并</b><br><span class="src"><code>split_tiling.py:260-278</code></span></td><td>split reduction:多 block 部分和 + 原子加/二次归约</td><td>"grid&gt;1 with no cross-core combine (A5)" → 动态 full reduction 只能单核;静态走多层拆分+中间物化</td><td>规约锚点(softmax/LN)要么单核串行、要么拆组</td><td>能融但<b>只能单核</b></td></tr>
     <tr><td><b>H4 无随机 gather/scatter</b><br><span class="src"><code>ir.py:1708-1769</code></span></td><td>每线程任意寻址,index 类天然融进 pointwise</td><td>间接寻址 → SIMT_ONLY(标量核,tile ≤ 8KB)或特殊指令;A5 用 NDDMA + simd_simt_mix 缓解(模板仅 11 op)</td><td>embedding/gather 融合收益骤降;线性化失败降级或拆 kernel</td><td>融合了但<b>降到标量路径</b></td></tr>
   </table>
@@ -346,7 +346,7 @@
     <tr data-a="sw" data-i="ratio"><td>约 750 op 强制 fallback + 强制物化</td><td><span class="pill sw">软件</span></td><td class="src"><code>lowering_fallback_list.py</code>、<code>lowering.py:103</code></td><td>★★★★★</td><td>★★</td><td>生效</td></tr>
     <tr data-a="sw" data-i="ratio"><td>view/expand 逐出融合(transformer reshape 密集伤害)</td><td><span class="pill sw">软件</span></td><td class="src"><code>lowering_fallback_list.py:191-224</code></td><td>★★★★</td><td>★★</td><td>生效</td></tr>
     <tr data-a="sw" data-i="both"><td>LN / cat / gelu 锚点缺位</td><td><span class="pill sw">软件</span></td><td class="src"><code>lowering.py:1190/:1284</code>、<code>decomposition.py</code></td><td>★★★★</td><td>★★★</td><td>生效(A5 LN 默认 fallback)</td></tr>
-    <tr data-a="mix" data-i="ratio"><td>GEMM epilogue 白名单 + 四层开关</td><td><span class="pill mix">软件 gating × 芯片分档</span></td><td class="src"><code>config.py:225-227</code>、<code>gemm_template.py:840-898</code></td><td>★★★★</td><td>★★★</td><td>默认关</td></tr>
+    <tr data-a="mix" data-i="ratio"><td>GEMM epilogue 双通道默认关(Triton CV 模板 + catlass EVG,后者白名单 {add, relu})</td><td><span class="pill mix">软件 gating × 芯片分档</span></td><td class="src"><code>kernel/mm.py:78-90</code>、<code>config.py:225-227</code>、<code>gemm_template.py:840-898</code></td><td>★★★★</td><td>★★★</td><td>默认关</td></tr>
     <tr data-a="sw" data-i="both"><td>mm+mm 移除 / 非 A5 addmm 拆分</td><td><span class="pill sw">软件</span></td><td class="src"><code>post_grad.py:8-29</code>、<code>dvm/config.py:31</code></td><td>★★</td><td>★★</td><td>生效</td></tr>
     <tr data-a="mix" data-i="ratio"><td>编译可行性门(模板 epilogue 超 UB 拒绝)</td><td><span class="pill mix">软件门 × 硬件因</span></td><td class="src"><code>scheduler.py:406-431</code></td><td>★★★</td><td>★★</td><td>生效</td></tr>
     <tr data-a="mix" data-i="ratio"><td>长距离阈值 64 → 20</td><td><span class="pill mix">软件阈值 × 硬件因</span></td><td class="src"><code>scheduler.py:223-235</code></td><td>★★</td><td>★</td><td>A5 生效</td></tr>
@@ -374,7 +374,7 @@
   <h3>单变量实验矩阵(每项只动一个开关)</h3>
   <table>
     <tr><th>实验</th><th>验证的假设</th></tr>
-    <tr><td>开 <code>CATLASS_EPILOGUE_FUSION</code> + max-autotune</td><td>GEMM epilogue 对比例的贡献</td></tr>
+    <tr><td>开 <code>max-autotune</code>(± <code>CATLASS_EPILOGUE_FUSION</code>)</td><td>GEMM epilogue 双通道(Triton CV / catlass)对比例的贡献,及 Triton 通道的 UB 拒绝率</td></tr>
     <tr><td>开 <code>TORCHINDUCTOR_ENABLE_WELFORD</code></td><td>LN 锚点缺位的贡献</td></tr>
     <tr><td><code>ENABLE_INPLACE_BUFFERS=0</code></td><td>启用 NPU-IR multi-buffer 的收益</td></tr>
     <tr><td>从 fallback 清单移除 view 族</td><td>view 障碍的贡献(transformer 场景)</td></tr>
@@ -401,8 +401,8 @@ const GATES = [
   <br><br>叠加的 NPU 保守 patch(编译可行性门、长距离 20、模板白名单、spill&gt;0、nolinear 静默 inf)计入关卡 4/6 与第 3.3 节。<b>所以"scheduler 判不判得出"不是差异来源。</b>`, s:"same"},
   {t:"编译可行性关:UB / 线性化 / spill", b:`融合决策做出后,A5 还要过编译验证:① <b>UB 溢出</b>:triton-ascend 硬检查 <code>ub overflow requires X bits while Y bits available</code>(<code>triton_heuristics.py:1031-1048</code>)→ 缩 tile 重试一次(留 20% 余量)→ 全败则 NoTritonConfigsError 回退;② <b>索引线性化失败</b>(<code>can_split_all</code>,<code>ir.py:1562-1583</code>):A5 降级 SIMT(tile ≤ 8KB);③ <b>spill</b>:n_spills&gt;0 即判 inf(上游 &gt;8)。
   <br><br><b>GPU 上不存在此关卡:融合决策做出后编译几乎必然成功。</b>`, s:"hw"},
-  {t:"模板 epilogue 关:固定 tile + UB 验证", b:`GEMM 模板选中后 tile 固定;追加 epilogue 可能使 UB 超限(<code>scheduler.py:406-416</code> 注释自述),故即使不开 benchmark 也强制编译验证,失败拒绝融合并打点 <code>npu_template_compile_reject</code>。catlass 通道本身被四层默认关的开关门控,白名单仅 <code>{add, relu}</code> 单节点。
-  <br><br><b>GPU:Triton 模板 epilogue 接受任意 pointwise 链,无此验证环节。</b>可在 3.2 节模拟开关状态。`, s:"hw"},
+  {t:"模板 epilogue 关:固定 tile + UB 验证", b:`NPU 有两条 GEMM epilogue 通道:① <b>Triton 模板(triton CV 融合)</b>——<code>tl.dot</code>→Cube、pointwise epilogue 经 <code>&#123;&#123;store_output&#125;&#125;</code> 编进同一 kernel(无算子白名单,mm.py:78-90);② <b>catlass EVG</b>——四层默认关的开关 + 白名单仅 <code>{add, relu}</code> 单节点。两条默认全关(max_autotune)。模板选中后 tile 固定;追加 epilogue 放大 UB 工作集,即使不开 benchmark 也强制编译验证(<code>scheduler.py:406-416</code>),失败拒绝融合并打点 <code>npu_template_compile_reject</code>。
+  <br><br><b>GPU:同一 Triton 模板机制开 max-autotune 即可用,无 UB 编译门,epilogue 链几乎必然编得过。</b>可在 3.2 节模拟开关状态。`, s:"hw"},
   {t:"调度距离关:64 → 20", b:`A5 上 <code>are_long_distant_nodes</code> 阈值从 64 收紧到 20(scheduler.py:223-235,注释:"GPU default score is 64, A5 use 20 to avoiding runtime errors in large kernels")——大融合 kernel 在 A5 有运行时错误风险,这是硬件规模上限的软件表现。距离 20-64 的生产者-消费者对在 GPU 会水平融合,A5 不融合。4.3 节可交互演示。`, s:"hw"},
 ];
 const gateDetail = document.getElementById('gateDetail');
@@ -450,17 +450,20 @@ function updEp(){
   const on = ['sw1','sw2','sw3','sw4'].map(id=>document.getElementById(id).checked);
   const cnt = on.filter(Boolean).length;
   if(soc==='910'){
-    epStatus.className='closed';
-    epStatus.innerHTML=`<b>通道不存在(910B)</b>:catlass 仅支持 Ascend 950DT/950PR。910 上 GEMM epilogue 融合为<b>零</b>;且 <code>disable_addmm_fusion = not is_ascend950</code>(dvm/config.py:31)——连 mm+add(bias) 都拆开;fx_passes 还主动移除 mm+mm 融合 pattern。`;
+    epStatus.className=on[0]?'open':'closed';
+    epStatus.innerHTML=(on[0]
+      ?`<b>910B 仅剩通道①(Triton CV 模板,已随 max_autotune 打开)</b>:catlass 通道② 不存在(仅支持 Ascend 950DT/950PR)。Triton CV 通道无 SOC 门槛(mm.py 模板参数考虑 910B CUBE 硬件限制)。`
+      :`<b>两条通道默认关(910B)</b>:catlass 仅支持 Ascend 950DT/950PR;通道①(Triton CV 模板)无 SOC 门槛但同样默认关。`)+
+      ` 另:<code>disable_addmm_fusion = not is_ascend950</code>(dvm/config.py:31)——连 mm+add(bias) 都拆开;fx_passes 还主动移除 mm+mm 融合 pattern。`;
     return;
   }
   if(cnt===4){
     epStatus.className='open';
-    epStatus.innerHTML=`<b>通道打开,但表达面仍远窄于 GPU</b>:fast 路径白名单仅 <code>{add, relu}</code>、最多一次、仅 1 个 epilogue 节点、bias 须 1 维连续、禁链式(<code>assert len(existing_epilogue_nodes)==0</code>)、禁 reduction、水平融合恒 False;EVG 支持 mul/div/sub/sigmoid,其余(tanh/ge/bf16+旧模板)NotImplementedError。<br><b>GPU 对照:Triton 模板 epilogue 接受任意 pointwise 链 + prologue fusion。</b>`;
+    epStatus.innerHTML=`<b>两条通道全开</b>:通道①(Triton CV)接受任意可 lowering 的 pointwise 链,但追加 epilogue 放大 UB 工作集,受编译可行性门约束(UB 超限即拒绝,<code>npu_template_compile_reject</code> 打点);通道②(catlass)表达面窄:fast 路径白名单仅 <code>{add, relu}</code>、最多一次、仅 1 个 epilogue 节点、bias 须 1 维连续、禁链式(<code>assert len(existing_epilogue_nodes)==0</code>)、禁 reduction、水平融合恒 False;EVG 支持 mul/div/sub/sigmoid,其余(tanh/ge/bf16+旧模板)NotImplementedError。<br><b>GPU 对照:同一 max_autotune 门控,但无 UB 编译门,epilogue 链几乎必然编得过。</b>`;
   } else {
     epStatus.className='closed';
     const miss = ['max_autotune','GEMM_BACKENDS 含 CATLASS','CATLASS_EPILOGUE_FUSION','catlass 库'].filter((_,i)=>!on[i]);
-    epStatus.innerHTML=`<b>通道关闭</b>(缺:${miss.join(' / ')})。开箱即用时 GEMM epilogue 融合为 0 条路径生效——GEMM 周边的 pointwise 各自成 kernel。这就是 transformer 负载融合比例差距的大头之一。已开 ${cnt}/4。`;
+    epStatus.innerHTML=`<b>通道关闭</b>(缺:${miss.join(' / ')})。max_autotune 关闭时<b>两条通道都不生效</b>——开箱即用时 GEMM epilogue 融合为 0 条路径生效,GEMM 周边的 pointwise 各自成 kernel,这是 transformer 负载融合比例差距的大头之一。仅补齐 2-4 层时通道② 仍缺总闸;通道① 在 max_autotune 打开时已进入候选(受 UB 门)。已开 ${cnt}/4。`;
   }
 }
 ['sw1','sw2','sw3','sw4'].forEach(id=>document.getElementById(id).addEventListener('change',updEp));
